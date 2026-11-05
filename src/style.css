@@ -81,6 +81,21 @@ h1 {
   font-size: 0.78rem;
   white-space: nowrap;
 }
+.file-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+.file-actions button {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  white-space: nowrap;
+}
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 
 .workspace {
   --split: 52%;
@@ -203,6 +218,9 @@ button:hover {
   margin-top: 0.25rem;
   color: #485b6d;
   line-height: 1.4;
+}
+.editor-intro button {
+  margin-top: 0.4rem;
 }
 .editor-host {
   min-height: 8rem;

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { AuthoringWorkspace } from "../../src/workspace";
+import { AuthoringWorkspace, type WorkspaceAdapter } from "../../src/workspace";
 
 afterEach(() => vi.useRealTimers());
 
@@ -19,4 +19,55 @@ it("debounces draft feedback for 300 ms and never sends it to GeoGebra", () => {
     "FormulaText(Simplify(FormulaText((a))))",
   );
   expect(onChange).toHaveBeenCalledOnce();
+});
+
+it("keeps source and simplification as a draft until explicit Apply", async () => {
+  let applied = {
+    id: "doc-1",
+    targetLabel: "text1",
+    source: "",
+    simplify: true,
+    compiledFingerprint: "sha256:old",
+  };
+  const applyManagedText = vi.fn(
+    async (
+      _id: string,
+      source: string,
+      simplify: boolean,
+      _expression: string,
+    ) => {
+      applied = {
+        ...applied,
+        source,
+        simplify,
+        compiledFingerprint: "sha256:new",
+      };
+      return applied;
+    },
+  );
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => [],
+    createManagedText: async () => applied,
+    applyManagedText,
+    importBase64: async () => {},
+    getManagedTexts: () => [applied],
+    exportBase64: async () => "file",
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  expect(workspace.target?.simplify).toBe(true);
+  workspace.setSource("λ✓漢字");
+  workspace.setSimplify(false);
+  workspace.validateNow();
+  expect(workspace.hasDraft).toBe(true);
+  expect(applyManagedText).not.toHaveBeenCalled();
+  await workspace.apply();
+  expect(applyManagedText).toHaveBeenCalledWith(
+    "doc-1",
+    "λ✓漢字",
+    false,
+    'FormulaText("λ✓漢字")',
+  );
+  expect(workspace.hasDraft).toBe(false);
+  expect(workspace.target?.compiledFingerprint).toBe("sha256:new");
 });

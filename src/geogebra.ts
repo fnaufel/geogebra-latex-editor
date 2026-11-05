@@ -1,4 +1,13 @@
 import type { SymbolInfo } from "./compiler";
+import {
+  decodeMetadata,
+  emptyMetadata,
+  encodeMetadata,
+  METADATA_LABEL,
+  METADATA_PREFIX,
+  type ManagedDocument,
+  type MetadataEnvelope,
+} from "./metadata";
 
 export const GEOGEBRA_VERSION = "5.4.920.0";
 const CODEBASE = `https://www.geogebra.org/apps/${GEOGEBRA_VERSION}/web3d`;
@@ -20,6 +29,25 @@ interface AppletApi {
   getAllObjectNames?(): string[];
   getObjectType?(label: string): string;
   isDefined?(label: string): boolean;
+  evalCommand?(command: string): boolean;
+  evalCommandGetLabels?(command: string): string;
+  exists?(label: string): boolean;
+  getValueString?(label: string): string;
+  getCommandString?(label: string, localized?: boolean): string;
+  getViewProperties?(view: number): string;
+  setCoords?(label: string, x: number, y: number): void;
+  setVisible?(label: string, visible: boolean): void;
+  setAuxiliary?(label: string, auxiliary: boolean): void;
+  setFixed?(label: string, fixed: boolean, selectionAllowed: boolean): void;
+  getXML?(label?: string): string;
+  setXML?(xml: string): void;
+  setUndoPoint?(): void;
+  getBase64?(callback: (base64: string) => void): void;
+  setBase64?(base64: string, callback: () => void): void;
+}
+
+export interface ManagedText extends ManagedDocument {
+  id: string;
 }
 
 interface AppletEmbed {
@@ -195,6 +223,189 @@ export class GeoGebraAdapter {
     } catch {
       return [];
     }
+  }
+
+  private readyApi(): AppletApi {
+    if (this.currentState.kind !== "ready" || !this.api)
+      throw new Error("GeoGebra is not ready.");
+    return this.api;
+  }
+
+  private metadata(): { label: string | null; envelope: MetadataEnvelope } {
+    const api = this.readyApi();
+    for (const label of api.getAllObjectNames?.() ?? []) {
+      if (
+        !label.startsWith(METADATA_PREFIX) ||
+        api.getObjectType?.(label) !== "text"
+      )
+        continue;
+      const value = String(api.getValueString?.(label) ?? "");
+      const envelope = decodeMetadata(value);
+      if (envelope) return { label, envelope };
+    }
+    return { label: null, envelope: emptyMetadata() };
+  }
+
+  getManagedTexts(): ManagedText[] {
+    const api = this.readyApi();
+    return Object.entries(this.metadata().envelope.documents)
+      .filter(
+        ([, document]) => api.getObjectType?.(document.targetLabel) === "text",
+      )
+      .map(([id, document]) => ({ id, ...document }));
+  }
+
+  private metadataLabel(existing: string | null): string {
+    if (existing) return existing;
+    const api = this.readyApi();
+    if (!api.exists?.(METADATA_LABEL)) return METADATA_LABEL;
+    for (let suffix = 1; suffix < 10000; suffix++) {
+      const label = `${METADATA_PREFIX}_${suffix}`;
+      if (!api.exists?.(label)) return label;
+    }
+    throw new Error("No metadata label is available.");
+  }
+
+  private writeMetadata(label: string, envelope: MetadataEnvelope): void {
+    const api = this.readyApi();
+    const encoded = encodeMetadata(envelope);
+    api.evalCommand?.(`${label}="${encoded}"`);
+    if (api.getObjectType?.(label) !== "text")
+      throw new Error("Metadata text was not created.");
+    api.setVisible?.(label, false);
+    api.setAuxiliary?.(label, true);
+    api.setFixed?.(label, true, false);
+    if (String(api.getValueString?.(label) ?? "") !== encoded)
+      throw new Error("Metadata verification failed.");
+  }
+
+  private async fingerprint(label: string): Promise<string> {
+    const command = String(
+      this.readyApi().getCommandString?.(label, false) ?? "",
+    );
+    const bytes = new TextEncoder().encode(command);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  async createManagedText(): Promise<ManagedText> {
+    const api = this.readyApi();
+    const snapshot = api.getXML?.();
+    try {
+      const label = String(api.evalCommandGetLabels?.('" "') ?? "").split(
+        ",",
+      )[0];
+      if (!label || api.getObjectType?.(label) !== "text")
+        throw new Error("GeoGebra did not create a text object.");
+      api.evalCommand?.(`${label}=FormulaText(Simplify(""))`);
+      if (api.getObjectType?.(label) !== "text")
+        throw new Error("GeoGebra did not retain the empty text object.");
+      if (!api.getViewProperties || !api.setCoords)
+        throw new Error(
+          "GeoGebra cannot position the text in the visible view.",
+        );
+      const view = JSON.parse(String(api.getViewProperties?.(1) ?? "{}")) as {
+        xMin?: number;
+        yMin?: number;
+        width?: number;
+        height?: number;
+        invXscale?: number;
+        invYscale?: number;
+      };
+      if (
+        ![
+          view.xMin,
+          view.yMin,
+          view.width,
+          view.height,
+          view.invXscale,
+          view.invYscale,
+        ].every((value) => typeof value === "number")
+      )
+        throw new Error("GeoGebra did not report visible view bounds.");
+      api.setCoords(
+        label,
+        view.xMin! + (view.width! * view.invXscale!) / 2,
+        view.yMin! + (view.height! * view.invYscale!) / 2,
+      );
+      const metadata = this.metadata();
+      const document: ManagedDocument = {
+        targetLabel: label,
+        source: "",
+        simplify: true,
+        compiledFingerprint: await this.fingerprint(label),
+      };
+      const id = crypto.randomUUID();
+      metadata.envelope.documents[id] = document;
+      this.writeMetadata(this.metadataLabel(metadata.label), metadata.envelope);
+      api.setUndoPoint?.();
+      return { id, ...document };
+    } catch (error) {
+      if (snapshot) api.setXML?.(snapshot);
+      throw error;
+    }
+  }
+
+  async applyManagedText(
+    id: string,
+    source: string,
+    simplify: boolean,
+    expression: string,
+  ): Promise<ManagedText> {
+    const api = this.readyApi();
+    const metadata = this.metadata();
+    const document = metadata.envelope.documents[id];
+    if (!document || api.getObjectType?.(document.targetLabel) !== "text")
+      throw new Error("Editing Target no longer exists.");
+    const snapshot = api.getXML?.();
+    const presentation = api.getXML?.(document.targetLabel);
+    try {
+      api.evalCommand?.(`${document.targetLabel}=${expression}`);
+      if (api.getObjectType?.(document.targetLabel) !== "text")
+        throw new Error("GeoGebra did not retain the Editing Target.");
+      if (!api.getCommandString?.(document.targetLabel, false))
+        throw new Error("GeoGebra did not retain the Compiled Definition.");
+      if (
+        presentation &&
+        api
+          .getXML?.(document.targetLabel)
+          ?.slice(api.getXML(document.targetLabel).indexOf("<element")) !==
+          presentation.slice(presentation.indexOf("<element"))
+      )
+        throw new Error("GeoGebra changed the Editing Target presentation.");
+      const updated: ManagedDocument = {
+        targetLabel: document.targetLabel,
+        source,
+        simplify,
+        compiledFingerprint: await this.fingerprint(document.targetLabel),
+      };
+      metadata.envelope.documents[id] = updated;
+      this.writeMetadata(this.metadataLabel(metadata.label), metadata.envelope);
+      api.setUndoPoint?.();
+      return { id, ...updated };
+    } catch (error) {
+      if (snapshot) api.setXML?.(snapshot);
+      throw error;
+    }
+  }
+
+  exportBase64(): Promise<string> {
+    const api = this.readyApi();
+    return new Promise((resolve, reject) => {
+      if (!api.getBase64)
+        return reject(new Error("GeoGebra export is unavailable."));
+      api.getBase64((value) =>
+        value
+          ? resolve(String(value))
+          : reject(new Error("GeoGebra export failed.")),
+      );
+    });
+  }
+
+  async importBase64(base64: string): Promise<void> {
+    const api = this.readyApi();
+    if (!api.setBase64) throw new Error("GeoGebra import is unavailable.");
+    await new Promise<void>((resolve) => api.setBase64!(base64, resolve));
   }
 
   resize(): void {

@@ -21,6 +21,7 @@ import {
   type SymbolInfo,
 } from "./compiler";
 import { AuthoringWorkspace } from "./workspace";
+import type { GeoGebraAdapter, ManagedText } from "./geogebra";
 
 const LATEX_COMPLETIONS = [
   "\\frac",
@@ -128,8 +129,18 @@ export function mountAuthoringEditor(
   compiledHost: HTMLElement,
   simplifyInput: HTMLInputElement,
   copyButton: HTMLButtonElement,
-  getSymbols: () => readonly SymbolInfo[],
-): { refreshSymbols: () => void } {
+  adapter: GeoGebraAdapter,
+  onState: (target: ManagedText | null, hasDraft: boolean) => void,
+): {
+  refreshSymbols: () => void;
+  create: () => Promise<ManagedText>;
+  apply: () => Promise<ManagedText>;
+  open: (base64: string) => Promise<ManagedText | null>;
+  exportBase64: () => Promise<string>;
+  hasDraft: () => boolean;
+} {
+  const getSymbols = () => adapter.getSymbols();
+  let replacing = false;
   const render = (result: CompileResult) => {
     compiledHost.textContent =
       result.expression ?? "No definition while errors remain.";
@@ -166,8 +177,9 @@ export function mountAuthoringEditor(
       ),
     );
     if (view.hasFocus) startCompletion(view);
+    onState(workspace.target, workspace.hasDraft);
   };
-  const workspace = new AuthoringWorkspace(render);
+  const workspace = new AuthoringWorkspace(render, adapter);
   const view = new EditorView({
     state: EditorState.create({
       extensions: [
@@ -180,7 +192,7 @@ export function mountAuthoringEditor(
           override: [(context) => sourceCompletion(context, getSymbols)],
         }),
         EditorView.updateListener.of((update) => {
-          if (!update.docChanged) return;
+          if (!update.docChanged || replacing) return;
           workspace.setSource(update.state.doc.toString());
           workspace.setSymbols(getSymbols());
         }),
@@ -188,13 +200,47 @@ export function mountAuthoringEditor(
     }),
     parent: editorHost,
   });
-  simplifyInput.addEventListener("change", () =>
-    workspace.setSimplify(simplifyInput.checked),
-  );
+  simplifyInput.addEventListener("change", () => {
+    workspace.setSimplify(simplifyInput.checked);
+    onState(workspace.target, workspace.hasDraft);
+  });
   copyButton.addEventListener("click", async () => {
     const definition = workspace.result.expression;
     if (definition) await navigator.clipboard.writeText(definition);
   });
   render(workspace.result);
-  return { refreshSymbols: () => workspace.setSymbols(getSymbols()) };
+  function showTarget(): void {
+    replacing = true;
+    view.dispatch({
+      changes: {
+        from: 0,
+        to: view.state.doc.length,
+        insert: workspace.currentSource,
+      },
+    });
+    replacing = false;
+    simplifyInput.checked = workspace.currentSimplify;
+    onState(workspace.target, workspace.hasDraft);
+    view.focus();
+  }
+  return {
+    refreshSymbols: () => workspace.setSymbols(getSymbols()),
+    create: async () => {
+      const target = await workspace.create();
+      showTarget();
+      return target;
+    },
+    apply: async () => {
+      const target = await workspace.apply();
+      onState(workspace.target, workspace.hasDraft);
+      return target;
+    },
+    open: async (base64) => {
+      const target = await workspace.open(base64);
+      showTarget();
+      return target;
+    },
+    exportBase64: () => workspace.exportBase64(),
+    hasDraft: () => workspace.hasDraft,
+  };
 }

@@ -16,6 +16,13 @@ root.innerHTML = `
       </div>
     </div>
     <span class="pin">GeoGebra Classic ${GEOGEBRA_VERSION}</span>
+    <div class="file-actions">
+      <button id="new-managed-text" type="button" disabled>New Managed Text</button>
+      <button id="open-file" type="button" disabled>Open .ggb</button>
+      <input id="file-input" type="file" accept=".ggb,application/vnd.geogebra.file" hidden>
+      <button id="download-file" type="button" disabled>Download .ggb</button>
+      <span id="filename">construction.ggb</span>
+    </div>
   </header>
   <main class="workspace" aria-label="Construction and authoring workspace">
     <section class="pane construction-pane" aria-labelledby="construction-heading">
@@ -35,9 +42,9 @@ root.innerHTML = `
     <section class="pane editor-pane" aria-labelledby="editor-heading">
       <div class="pane-heading"><h2 id="editor-heading">Authoring Source</h2></div>
       <div class="editor-intro">
-        <strong>No Editing Target</strong>
-        <p>No text is open for editing.</p>
-        <p>Draft preview only. GeoGebra is unchanged.</p>
+        <strong id="target-label">No Editing Target</strong>
+        <p id="target-state">No text is open for editing.</p>
+        <button id="apply" type="button" disabled>Apply</button>
       </div>
       <div id="editor" class="editor-host" aria-label="Authoring Source editor"></div>
       <div class="editor-feedback">
@@ -74,9 +81,21 @@ const loadingMark = required<HTMLElement>("#loading-mark");
 const retry = required<HTMLButtonElement>("#retry");
 const splitter = required<HTMLElement>("#splitter");
 const editorHost = required<HTMLElement>("#editor");
+const newManagedText = required<HTMLButtonElement>("#new-managed-text");
+const openFile = required<HTMLButtonElement>("#open-file");
+const fileInput = required<HTMLInputElement>("#file-input");
+const downloadFile = required<HTMLButtonElement>("#download-file");
+const filename = required<HTMLElement>("#filename");
+const targetLabel = required<HTMLElement>("#target-label");
+const targetState = required<HTMLElement>("#target-state");
+const applyButton = required<HTMLButtonElement>("#apply");
 let refreshSymbols = () => {};
 
 function renderAppletState(state: AppletState): void {
+  const ready = state.kind === "ready";
+  newManagedText.disabled = !ready;
+  openFile.disabled = !ready;
+  downloadFile.disabled = !ready;
   notice.hidden = state.kind === "ready";
   retry.hidden =
     state.kind === "idle" || state.kind === "loading" || state.kind === "ready";
@@ -101,14 +120,84 @@ function renderAppletState(state: AppletState): void {
 }
 
 const adapter = new GeoGebraAdapter(appletElement, renderAppletState);
-({ refreshSymbols } = mountAuthoringEditor(
+const authoring = mountAuthoringEditor(
   editorHost,
   required<HTMLElement>("#diagnostics"),
   required<HTMLElement>("#compiled-definition"),
   required<HTMLInputElement>("#simplify"),
   required<HTMLButtonElement>("#copy-definition"),
-  () => adapter.getSymbols(),
-));
+  adapter,
+  (target, hasDraft) => {
+    targetLabel.textContent = target
+      ? `Editing Target: ${target.targetLabel}`
+      : "No Editing Target";
+    targetState.textContent = target
+      ? hasDraft
+        ? "Draft Source has unapplied changes."
+        : "Applied Source is current."
+      : "No text is open for editing.";
+    applyButton.disabled = !target || !hasDraft;
+  },
+);
+refreshSymbols = authoring.refreshSymbols;
+
+function reportActionError(error: unknown): void {
+  targetState.textContent =
+    error instanceof Error ? error.message : "GeoGebra action failed.";
+}
+
+newManagedText.addEventListener("click", () => {
+  void authoring.create().catch(reportActionError);
+});
+applyButton.addEventListener("click", () => {
+  void authoring.apply().catch(reportActionError);
+});
+openFile.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => {
+  const file = fileInput.files?.[0];
+  if (!file) return;
+  void (async () => {
+    if (
+      authoring.hasDraft() &&
+      !window.confirm(
+        "Discard unapplied Draft Source and open another construction?",
+      )
+    )
+      return;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    await authoring.open(btoa(binary));
+    filename.textContent = file.name.replace(/\.ggb$/i, "") + "-edited.ggb";
+    refreshSymbols();
+  })()
+    .catch(reportActionError)
+    .finally(() => {
+      fileInput.value = "";
+    });
+});
+downloadFile.addEventListener("click", () => {
+  void (async () => {
+    if (
+      authoring.hasDraft() &&
+      !window.confirm(
+        "Download Applied State only? Unapplied Draft Source will stay in the editor.",
+      )
+    )
+      return;
+    const base64 = await authoring.exportBase64();
+    const binary = atob(base64);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const url = URL.createObjectURL(
+      new Blob([bytes], { type: "application/vnd.geogebra.file" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename.textContent || "construction.ggb";
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  })().catch(reportActionError);
+});
 retry.addEventListener("click", () => void adapter.retry());
 new ResizeObserver(() => adapter.resize()).observe(
   required<HTMLElement>(".applet-stage"),
