@@ -1,0 +1,266 @@
+:root {
+  font-family:
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  color: #1b2632;
+  background: #f4f6f8;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  min-height: 420px;
+}
+
+button,
+a,
+[role="separator"] {
+  outline-offset: 3px;
+}
+
+:focus-visible {
+  outline: 3px solid #1763a6;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.65rem 1.1rem;
+  background: #14263b;
+  color: #fff;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 2.3rem;
+  height: 2.3rem;
+  border-radius: 0.5rem;
+  background: #187cb3;
+  font:
+    700 1.55rem Georgia,
+    serif;
+}
+h1,
+h2,
+p {
+  margin: 0;
+}
+h1 {
+  font-size: 1.05rem;
+  line-height: 1.3;
+}
+.brand p {
+  color: #c9d8e8;
+  font-size: 0.8rem;
+}
+.pin {
+  color: #d6e5f1;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.workspace {
+  --split: 52%;
+  display: grid;
+  grid-template-columns: minmax(0, var(--split)) 9px minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+}
+
+.pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.construction-pane {
+  background: #fff;
+}
+.editor-pane {
+  background: #f9fafc;
+}
+.pane-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  padding: 0.55rem 0.9rem;
+  border-bottom: 1px solid #ced8e2;
+}
+h2 {
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+.pane-heading p {
+  color: #3a5265;
+  font-size: 0.78rem;
+}
+.applet-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+#ggb-element {
+  width: 100%;
+  height: 100%;
+}
+.applet-notice {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: #f5f8fb;
+}
+.applet-notice[hidden],
+[hidden] {
+  display: none !important;
+}
+.notice-card {
+  max-width: 24rem;
+  padding: 1.3rem;
+  border: 1px solid #aabed1;
+  border-radius: 0.6rem;
+  background: #fff;
+  text-align: center;
+  box-shadow: 0 8px 28px #20385018;
+}
+.notice-card p {
+  line-height: 1.5;
+}
+.loader {
+  display: inline-block;
+  width: 1.4rem;
+  height: 1.4rem;
+  margin-bottom: 0.6rem;
+  border: 3px solid #a9cce2;
+  border-top-color: #1763a6;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+button {
+  margin-top: 1rem;
+  padding: 0.55rem 0.9rem;
+  border: 1px solid #15598e;
+  border-radius: 0.35rem;
+  background: #1763a6;
+  color: white;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover {
+  background: #104d84;
+}
+
+.splitter {
+  background: #d5e1ea;
+  border-left: 1px solid #b1c4d3;
+  border-right: 1px solid #b1c4d3;
+  cursor: col-resize;
+  touch-action: none;
+}
+.splitter:hover,
+.splitter:focus-visible,
+.splitter.dragging {
+  background: #1777ad;
+}
+.editor-intro {
+  padding: 0.85rem 0.9rem;
+  border-bottom: 1px solid #d8e0e8;
+  font-size: 0.88rem;
+}
+.editor-intro p {
+  margin-top: 0.25rem;
+  color: #485b6d;
+  line-height: 1.4;
+}
+.editor-host {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  background: white;
+}
+.editor-host .cm-editor {
+  height: 100%;
+  font-size: 0.92rem;
+}
+.editor-host .cm-scroller {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.editor-host .cm-content {
+  min-height: 100%;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+  padding: 0.45rem 1rem;
+  border-top: 1px solid #c5d3df;
+  background: #e8eef3;
+  font-size: 0.75rem;
+}
+.footer nav {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+a {
+  color: #125887;
+}
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+@media (max-width: 700px) {
+  .topbar {
+    flex-wrap: wrap;
+  }
+  .workspace.stacked {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, var(--split)) 9px minmax(0, 1fr);
+  }
+  .stacked .splitter {
+    cursor: row-resize;
+    border: 0;
+    border-top: 1px solid #b1c4d3;
+    border-bottom: 1px solid #b1c4d3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loader {
+    animation: none;
+  }
+}
