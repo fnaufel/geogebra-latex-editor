@@ -1,6 +1,4 @@
-import { EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
-import { basicSetup } from "codemirror";
+import { mountAuthoringEditor } from "./editor";
 import { AppletState, GeoGebraAdapter, GEOGEBRA_VERSION } from "./geogebra";
 import "./style.css";
 
@@ -39,8 +37,16 @@ root.innerHTML = `
       <div class="editor-intro">
         <strong>No Editing Target</strong>
         <p>No text is open for editing.</p>
+        <p>Draft preview only. GeoGebra is unchanged.</p>
       </div>
       <div id="editor" class="editor-host" aria-label="Authoring Source editor"></div>
+      <div class="editor-feedback">
+        <label class="simplify-control"><input id="simplify" type="checkbox" checked>Clean signs and 1x coefficients</label>
+        <p class="simplify-help">GeoGebra rewrites the complete text without understanding LaTeX. For example, \\text{C++} can become \\text{C + }, and \\text{--} can become \\text{ + }.</p>
+        <h3>Diagnostics</h3>
+        <div id="diagnostics" aria-live="polite"></div>
+        <details class="advanced"><summary>Advanced</summary><p>Compiled Definition</p><pre id="compiled-definition" aria-label="Compiled Definition"></pre><button id="copy-definition" type="button">Copy definition</button></details>
+      </div>
     </section>
   </main>
   <footer class="footer">
@@ -68,20 +74,7 @@ const loadingMark = required<HTMLElement>("#loading-mark");
 const retry = required<HTMLButtonElement>("#retry");
 const splitter = required<HTMLElement>("#splitter");
 const editorHost = required<HTMLElement>("#editor");
-
-// Keep the editor mounted across applet failures and retries so its local state survives.
-new EditorView({
-  state: EditorState.create({
-    extensions: [
-      basicSetup,
-      EditorState.readOnly.of(true),
-      EditorView.editable.of(false),
-      EditorView.lineWrapping,
-      EditorView.contentAttributes.of({ "aria-label": "Authoring Source" }),
-    ],
-  }),
-  parent: editorHost,
-});
+let refreshSymbols = () => {};
 
 function renderAppletState(state: AppletState): void {
   notice.hidden = state.kind === "ready";
@@ -95,6 +88,7 @@ function renderAppletState(state: AppletState): void {
       break;
     case "ready":
       status.textContent = `GeoGebra ready (${state.version}).`;
+      queueMicrotask(refreshSymbols);
       break;
     case "version-mismatch":
       status.textContent = `Version mismatch: expected ${GEOGEBRA_VERSION}, received ${state.actual}.`;
@@ -107,6 +101,14 @@ function renderAppletState(state: AppletState): void {
 }
 
 const adapter = new GeoGebraAdapter(appletElement, renderAppletState);
+({ refreshSymbols } = mountAuthoringEditor(
+  editorHost,
+  required<HTMLElement>("#diagnostics"),
+  required<HTMLElement>("#compiled-definition"),
+  required<HTMLInputElement>("#simplify"),
+  required<HTMLButtonElement>("#copy-definition"),
+  () => adapter.getSymbols(),
+));
 retry.addEventListener("click", () => void adapter.retry());
 new ResizeObserver(() => adapter.resize()).observe(
   required<HTMLElement>(".applet-stage"),

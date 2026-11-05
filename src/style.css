@@ -205,7 +205,7 @@ button:hover {
   line-height: 1.4;
 }
 .editor-host {
-  min-height: 0;
+  min-height: 8rem;
   flex: 1;
   overflow: auto;
   background: white;
@@ -219,6 +219,67 @@ button:hover {
 }
 .editor-host .cm-content {
   min-height: 100%;
+}
+.cm-latex-command {
+  color: #075c85;
+  font-weight: 650;
+}
+.cm-interpolation {
+  color: #742875;
+  background: #f5eaf7;
+}
+.cm-interpolation-unclosed {
+  color: #8d2626;
+  text-decoration: underline wavy;
+}
+.editor-feedback {
+  max-height: 45%;
+  overflow: auto;
+  padding: 0.65rem 0.9rem;
+  border-top: 1px solid #c5d3df;
+  background: #f9fafc;
+  font-size: 0.82rem;
+}
+.simplify-control {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 650;
+}
+.simplify-help {
+  margin: 0.35rem 0 0.65rem;
+  color: #3a5265;
+  line-height: 1.4;
+}
+.editor-feedback h3 {
+  margin: 0.6rem 0 0.3rem;
+  font-size: 0.85rem;
+}
+.diagnostic {
+  display: block;
+  width: 100%;
+  margin: 0.25rem 0;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #aebdcc;
+  background: #fff;
+  color: #1b2632;
+  text-align: left;
+  font-weight: 400;
+}
+.advanced {
+  margin-top: 0.6rem;
+}
+.advanced summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+.advanced pre {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  padding: 0.6rem;
+  border: 1px solid #c5d3df;
+  background: #fff;
+  font-size: 0.75rem;
 }
 
 .footer {

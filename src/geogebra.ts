@@ -1,3 +1,5 @@
+import type { SymbolInfo } from "./compiler";
+
 export const GEOGEBRA_VERSION = "5.4.920.0";
 const CODEBASE = `https://www.geogebra.org/apps/${GEOGEBRA_VERSION}/web3d`;
 const DEPLOY_SCRIPT = "https://www.geogebra.org/apps/deployggb.js";
@@ -15,6 +17,9 @@ interface AppletApi {
   setWidth(width: number): void;
   setHeight(height: number): void;
   remove?(): void;
+  getAllObjectNames?(): string[];
+  getObjectType?(label: string): string;
+  isDefined?(label: string): boolean;
 }
 
 interface AppletEmbed {
@@ -177,6 +182,19 @@ export class GeoGebraAdapter {
 
   retry(): Promise<void> {
     return this.start();
+  }
+
+  getSymbols(): SymbolInfo[] {
+    if (!this.api?.getAllObjectNames) return [];
+    try {
+      return this.api.getAllObjectNames().map((label) => ({
+        label,
+        type: this.api?.getObjectType?.(label) ?? "unknown",
+        defined: this.api?.isDefined?.(label) ?? true,
+      }));
+    } catch {
+      return [];
+    }
   }
 
   resize(): void {
