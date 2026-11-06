@@ -16,6 +16,8 @@ type Failure =
   | "group-metadata"
   | "group-presentation"
   | "group-metadata-presentation"
+  | "selection-restore"
+  | "undo-point"
   | "rollback";
 
 async function applet(failure?: Failure) {
@@ -39,6 +41,7 @@ async function applet(failure?: Failure) {
   let state = { ...initial };
   let restoreCount = 0;
   let undoPoints = 0;
+  let clientListener: (event: unknown) => void = () => {};
   const api = {
     getVersion: () => GEOGEBRA_VERSION,
     setWidth: () => {},
@@ -68,6 +71,8 @@ async function applet(failure?: Failure) {
         state.command = 'LaTeX("damaged")';
     },
     evalCommand: (command: string) => {
+      if (command.startsWith("SelectObjects("))
+        return failure !== "selection-restore";
       const [definition, metadata] = command.split("\n");
       const grouped = metadata !== undefined;
       if (failure !== (grouped ? "group-definition" : "stage-definition")) {
@@ -86,13 +91,19 @@ async function applet(failure?: Failure) {
       if (grouped && failure === "group-metadata-presentation")
         state.metadataPresentation =
           '<element label="gglatexEditorMetadataV1" hidden="false"/>';
+      if (grouped && failure === "selection-restore")
+        clientListener(["deselect", "", ""]);
       return false;
     },
     setVisible: () => {},
     setAuxiliary: () => {},
     setFixed: () => {},
     setUndoPoint: () => {
+      if (failure === "undo-point") throw new Error("Undo unavailable.");
       undoPoints++;
+    },
+    registerClientListener: (listener: (event: unknown) => void) => {
+      clientListener = listener;
     },
   };
   vi.stubGlobal(
@@ -111,6 +122,7 @@ async function applet(failure?: Failure) {
     async () => {},
   );
   await adapter.start();
+  if (failure === "selection-restore") clientListener(["select", "text1", ""]);
   return {
     adapter,
     api,
@@ -170,6 +182,7 @@ it.each<{
   { failure: "group-metadata", reason: "APPLY_METADATA_FAILED" },
   { failure: "group-presentation", reason: "APPLY_POSTCONDITION_FAILED" },
   { failure: "group-metadata-presentation", reason: "APPLY_METADATA_FAILED" },
+  { failure: "undo-point", reason: "APPLY_MUTATION_FAILED" },
 ])(
   "restores both snapshots after $failure fails",
   async ({ failure, reason }) => {
@@ -191,6 +204,30 @@ it("reports rollback failure and records no undo point", async () => {
     reason: "APPLY_METADATA_FAILED",
   });
   expect(fixture.undoPoints()).toBe(0);
+  expect(fixture.adapter.hasRecoverableApplySnapshot).toBe(true);
+  await expect(apply(fixture.adapter)).rejects.toThrow("Apply is disabled");
+});
+
+it("halts Apply if selection cannot be restored after a grouped mutation", async () => {
+  const fixture = await applet("selection-restore");
+  await expect(apply(fixture.adapter)).rejects.toMatchObject({
+    code: "APPLY_ROLLBACK_FAILED",
+    reason: "APPLY_POSTCONDITION_FAILED",
+  });
+  expect(fixture.undoPoints()).toBe(0);
+  expect(fixture.adapter.hasRecoverableApplySnapshot).toBe(true);
+});
+
+it("keeps the recovery snapshot and Apply halt when restoration is incomplete", async () => {
+  const fixture = await applet("rollback");
+  await expect(apply(fixture.adapter)).rejects.toMatchObject({
+    code: "APPLY_ROLLBACK_FAILED",
+  });
+  expect(() =>
+    fixture.adapter.restoreApplySnapshot(
+      fixture.adapter.recoverableApplySnapshot!,
+    ),
+  ).toThrow("did not match");
   expect(fixture.adapter.hasRecoverableApplySnapshot).toBe(true);
   await expect(apply(fixture.adapter)).rejects.toThrow("Apply is disabled");
 });

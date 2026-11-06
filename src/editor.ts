@@ -32,6 +32,8 @@ export interface AuthoringUiState {
   selectionMessage: string;
   insertionMode: boolean;
   interactionMessage: string;
+  actionError: string | null;
+  recoveryAvailable: boolean;
 }
 
 const LATEX_COMPLETIONS = [
@@ -153,6 +155,9 @@ export function mountAuthoringEditor(
   hasAnyDraft: () => boolean;
   editSelectedText: () => boolean;
   discardDraft: () => void;
+  reportActionError: (error: unknown) => Promise<void>;
+  clearActionError: () => void;
+  recoverFailedApply: () => Promise<void>;
   startInsertion: () => void;
   cancelInsertion: () => void;
 } {
@@ -170,6 +175,8 @@ export function mountAuthoringEditor(
       selectionMessage: workspace.selectionMessage,
       insertionMode: workspace.insertionMode,
       interactionMessage: workspace.interactionMessage,
+      actionError: workspace.actionError,
+      recoveryAvailable: workspace.recoveryAvailable,
     });
   const render = (result: CompileResult) => {
     if (
@@ -319,6 +326,15 @@ export function mountAuthoringEditor(
       return pinned;
     },
     discardDraft: () => workspace.discardDraft(),
+    reportActionError: (error) =>
+      workspace.reportActionError(error, adapter.hasRecoverableApplySnapshot),
+    clearActionError: () => workspace.clearActionError(),
+    recoverFailedApply: async () => {
+      await workspace.recoverFailedApply();
+      states.clear();
+      shownId = null;
+      showTarget();
+    },
     startInsertion: () => {
       const { from, to } = view.state.selection.main;
       workspace.startInsertion(from, to);

@@ -213,6 +213,21 @@ export class GeoGebraAdapter {
     return this.failedApplySnapshot !== null;
   }
 
+  get recoverableApplySnapshot(): string | null {
+    return this.failedApplySnapshot;
+  }
+
+  restoreApplySnapshot(snapshot: string): void {
+    const api = this.readyApi();
+    if (!api.setXML || !api.getXML)
+      throw new Error("GeoGebra recovery is unavailable.");
+    api.setXML(snapshot);
+    if (api.getXML() !== snapshot)
+      throw new Error("Recovered construction did not match the snapshot.");
+    this.applyHalted = false;
+    this.failedApplySnapshot = null;
+  }
+
   onEvent(listener: (event: ConstructionEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -538,6 +553,7 @@ export class GeoGebraAdapter {
         "APPLY_SNAPSHOT_UNAVAILABLE",
         "GeoGebra cannot snapshot the Applied Source state.",
       );
+    const metadataLabel = metadata.label;
     const selectedBefore = [...this.selectedLabels];
     const selectionMatches = () =>
       selectedBefore.length === this.selectedLabels.size &&
@@ -581,6 +597,14 @@ export class GeoGebraAdapter {
       simplify: document.simplify,
       symbols: this.getSymbols(),
     }).expression;
+    const snapshotMatches = () =>
+      api.getObjectType?.(document.targetLabel) === "text" &&
+      api.getObjectType?.(metadataLabel) === "text" &&
+      api.getCommandString?.(document.targetLabel, false) === previousCommand &&
+      api.getValueString?.(document.targetLabel) === previousValue &&
+      String(api.getValueString?.(metadataLabel) ?? "") === previousMetadata &&
+      presentationMatches() &&
+      metadataPresentationMatches();
     try {
       // Observe GeoGebra's normalized command before writing its fingerprint.
       // Restore the snapshot so the final target/metadata write is one operation.
@@ -625,15 +649,7 @@ export class GeoGebraAdapter {
       const encoded = encodeMetadata(metadata.envelope);
       api.setXML(snapshot);
       restoreCaption();
-      if (
-        api.getCommandString?.(document.targetLabel, false) !==
-          previousCommand ||
-        api.getValueString?.(document.targetLabel) !== previousValue ||
-        String(api.getValueString?.(metadata.label) ?? "") !==
-          previousMetadata ||
-        !presentationMatches() ||
-        !metadataPresentationMatches()
-      )
+      if (!snapshotMatches())
         throw new ApplyFailure(
           "APPLY_POSTCONDITION_FAILED",
           "GeoGebra did not restore the pre-Apply state.",
@@ -685,15 +701,7 @@ export class GeoGebraAdapter {
         api.setXML(snapshot);
         restoreCaption();
         restoreSelection();
-        if (
-          api.getCommandString?.(document.targetLabel, false) !==
-            previousCommand ||
-          api.getValueString?.(document.targetLabel) !== previousValue ||
-          String(api.getValueString?.(metadata.label) ?? "") !==
-            previousMetadata ||
-          !presentationMatches() ||
-          !metadataPresentationMatches()
-        )
+        if (!snapshotMatches())
           throw new Error(
             "Rollback postconditions did not match the snapshot.",
             { cause: error },

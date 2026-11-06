@@ -226,7 +226,7 @@ test("failed grouped metadata write rolls back the applet and retains Draft Sour
   expect(after).toEqual(before);
 });
 
-test("failed rollback halts Apply and retains the draft in the current tab", async ({
+test("failed rollback halts Apply and offers its snapshot and draft after reload", async ({
   page,
 }) => {
   test.slow();
@@ -235,6 +235,9 @@ test("failed rollback halts Apply and retains the draft in the current tab", asy
     page.getByRole("status", { name: "Applet status" }),
   ).toContainText("GeoGebra ready", { timeout: 90_000 });
   await page.getByRole("button", { name: "New Managed Text" }).click();
+  const expectedSnapshot = await page.evaluate(() =>
+    (window as typeof window & { ggbApplet: LiveApplet }).ggbApplet.getXML(),
+  );
   await page.evaluate(() => {
     const api = (window as typeof window & { ggbApplet: LiveApplet }).ggbApplet;
     const evaluate = api.evalCommand.bind(api);
@@ -263,4 +266,59 @@ test("failed rollback halts Apply and retains the draft in the current tab", asy
   await expect(page.locator("#target-state")).toContainText(
     "Apply is disabled after a failed rollback",
   );
+  const [otherTab] = await Promise.all([
+    page.context().waitForEvent("page"),
+    page.evaluate(() => {
+      window.open(location.href, "_blank");
+    }),
+  ]);
+  await expect(
+    otherTab.getByRole("status", { name: "Applet status" }),
+  ).toContainText("GeoGebra ready", { timeout: 90_000 });
+  await expect(
+    otherTab.getByRole("button", { name: "Restore failed Apply draft" }),
+  ).toBeHidden();
+  await otherTab.close();
+  await page.reload();
+  await expect(
+    page.getByRole("status", { name: "Applet status" }),
+  ).toContainText("GeoGebra ready", { timeout: 90_000 });
+  const recover = page.getByRole("button", {
+    name: "Restore failed Apply draft",
+  });
+  await expect(recover).toBeVisible();
+  await page.evaluate(() => {
+    const api = (window as typeof window & { ggbApplet: LiveApplet }).ggbApplet;
+    (
+      window as typeof window & { restoreSetXML?: (xml: string) => void }
+    ).restoreSetXML = api.setXML.bind(api);
+    api.setXML = () => {};
+  });
+  page.once("dialog", (dialog) => dialog.accept());
+  await recover.click();
+  await expect(page.locator("#target-state")).toContainText(
+    "Recovered construction did not match the snapshot",
+  );
+  await expect(recover).toBeVisible();
+  await page.evaluate(() => {
+    const api = (window as typeof window & { ggbApplet: LiveApplet }).ggbApplet;
+    api.setXML = (
+      window as typeof window & { restoreSetXML: (xml: string) => void }
+    ).restoreSetXML;
+  });
+  page.once("dialog", (dialog) => dialog.accept());
+  await recover.click();
+  await expect(page.locator("#target-label")).toContainText("Editing Target:");
+  await expect
+    .poll(async () => (await editor.innerText()).trim())
+    .toBe("recover me");
+  await expect(page.locator("#target-state")).toContainText(
+    "Draft Source has unapplied changes",
+  );
+  await expect(recover).toBeHidden();
+  expect(
+    await page.evaluate(() =>
+      (window as typeof window & { ggbApplet: LiveApplet }).ggbApplet.getXML(),
+    ),
+  ).toBe(expectedSnapshot);
 });

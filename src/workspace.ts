@@ -4,6 +4,12 @@ import {
   type ConstructionEvent,
   type ManagedText,
 } from "./geogebra";
+import {
+  clearFailedApplyRecovery,
+  readFailedApplyRecovery,
+  saveFailedApplyRecovery,
+  type FailedApplyRecovery,
+} from "./failed-apply-recovery";
 
 export interface WorkspaceAdapter {
   getSymbols(): SymbolInfo[];
@@ -18,6 +24,8 @@ export interface WorkspaceAdapter {
   getManagedTexts(): ManagedText[];
   exportBase64(): Promise<string>;
   onEvent?(listener: (event: ConstructionEvent) => void): () => void;
+  readonly recoverableApplySnapshot?: string | null;
+  restoreApplySnapshot?(snapshot: string): void | Promise<void>;
 }
 
 export class AuthoringWorkspace {
@@ -42,6 +50,9 @@ export class AuthoringWorkspace {
   private insertionGeneration = 0;
   private unsubscribe?: () => void;
   private message = "";
+  private actionErrorMessage: string | null = null;
+  private recoveryRecord: FailedApplyRecovery | null = null;
+  private readonly recoveryLoad: Promise<void>;
 
   constructor(
     private readonly notify: (result: CompileResult) => void,
@@ -53,6 +64,12 @@ export class AuthoringWorkspace {
     ) => void,
   ) {
     this.unsubscribe = adapter?.onEvent?.((event) => this.handleEvent(event));
+    this.recoveryLoad = readFailedApplyRecovery()
+      .then((recovery) => {
+        this.recoveryRecord = recovery;
+        this.notify(this.compiled);
+      })
+      .catch(() => {});
   }
 
   get selectionMessage(): string {
@@ -83,6 +100,76 @@ export class AuthoringWorkspace {
 
   get interactionMessage(): string {
     return this.message;
+  }
+
+  get actionError(): string | null {
+    return this.actionErrorMessage;
+  }
+
+  get recoveryAvailable(): boolean {
+    return this.recoveryRecord !== null;
+  }
+
+  async reportActionError(
+    error: unknown,
+    recoverableSnapshot: boolean,
+  ): Promise<void> {
+    this.actionErrorMessage =
+      error instanceof ApplyFailure
+        ? `[${error.code}${error.reason ? `/${error.reason}` : ""}] ${error.message}${recoverableSnapshot ? " Download the current construction if possible, then reload before applying again." : ""}`
+        : error instanceof Error
+          ? error.message
+          : "GeoGebra action failed.";
+    if (
+      error instanceof ApplyFailure &&
+      error.code === "APPLY_ROLLBACK_FAILED" &&
+      this.editingTarget &&
+      this.adapter?.recoverableApplySnapshot
+    ) {
+      const recovery = {
+        snapshot: this.adapter.recoverableApplySnapshot,
+        id: this.editingTarget.id,
+        source: this.source,
+        simplify: this.simplify,
+      };
+      try {
+        await this.recoveryLoad;
+        this.recoveryRecord = await saveFailedApplyRecovery(recovery);
+      } catch {
+        this.actionErrorMessage +=
+          " Local recovery storage is unavailable; download the current construction before reloading.";
+      }
+    }
+    this.notify(this.compiled);
+  }
+
+  async recoverFailedApply(): Promise<void> {
+    await this.recoveryLoad;
+    const recovery = this.recoveryRecord;
+    if (!recovery || !this.adapter?.restoreApplySnapshot)
+      throw new Error("Failed Apply recovery is unavailable.");
+    await this.adapter.restoreApplySnapshot(recovery.snapshot);
+    const target = this.adapter
+      .getManagedTexts()
+      .find((text) => text.id === recovery.id);
+    if (!target)
+      throw new Error("The recovered Editing Target is unavailable.");
+    this.drafts.clear();
+    this.draftBaselines.clear();
+    this.editingTarget = null;
+    this.loadTarget(target);
+    this.setSource(recovery.source);
+    this.setSimplify(recovery.simplify);
+    this.validateNow();
+    await clearFailedApplyRecovery(recovery);
+    this.recoveryRecord = null;
+    this.clearActionError();
+  }
+
+  clearActionError(): void {
+    if (this.actionErrorMessage === null) return;
+    this.actionErrorMessage = null;
+    this.notify(this.compiled);
   }
 
   editSelectedText(): boolean {
@@ -183,10 +270,7 @@ export class AuthoringWorkspace {
       if (!dirty) {
         this.source = applied.source;
         this.simplify = applied.simplify;
-        this.drafts.set(applied.id, {
-          source: applied.source,
-          simplify: applied.simplify,
-        });
+        this.drafts.delete(applied.id);
         this.draftBaselines.delete(applied.id);
       }
     }
@@ -227,6 +311,7 @@ export class AuthoringWorkspace {
 
   discardDraft(): void {
     if (!this.editingTarget) return;
+    this.clearActionError();
     this.source = this.editingTarget.source;
     this.simplify = this.editingTarget.simplify;
     this.drafts.delete(this.editingTarget.id);
@@ -250,11 +335,17 @@ export class AuthoringWorkspace {
   private loadTarget(target: ManagedText | null): void {
     this.insertionGeneration++;
     this.insertionRange = null;
-    if (this.editingTarget)
-      this.drafts.set(this.editingTarget.id, {
-        source: this.source,
-        simplify: this.simplify,
-      });
+    if (this.editingTarget) {
+      if (this.hasDraft)
+        this.drafts.set(this.editingTarget.id, {
+          source: this.source,
+          simplify: this.simplify,
+        });
+      else {
+        this.drafts.delete(this.editingTarget.id);
+        this.draftBaselines.delete(this.editingTarget.id);
+      }
+    }
     this.editingTarget = target;
     const draft = target && this.drafts.get(target.id);
     this.source = draft?.source ?? target?.source ?? "";
@@ -266,6 +357,7 @@ export class AuthoringWorkspace {
   async create(): Promise<ManagedText> {
     if (!this.adapter) throw new Error("GeoGebra adapter is unavailable.");
     const target = await this.adapter.createManagedText();
+    this.clearActionError();
     this.loadTarget(target);
     return target;
   }
@@ -286,11 +378,9 @@ export class AuthoringWorkspace {
       this.simplify,
       result.expression,
     );
+    this.clearActionError();
     this.editingTarget = target;
-    this.drafts.set(target.id, {
-      source: target.source,
-      simplify: target.simplify,
-    });
+    this.drafts.delete(target.id);
     this.draftBaselines.delete(target.id);
     return target;
   }
@@ -298,6 +388,7 @@ export class AuthoringWorkspace {
   async open(base64: string): Promise<ManagedText | null> {
     if (!this.adapter) throw new Error("GeoGebra adapter is unavailable.");
     await this.adapter.importBase64(base64);
+    this.clearActionError();
     this.drafts.clear();
     this.draftBaselines.clear();
     this.editingTarget = null;

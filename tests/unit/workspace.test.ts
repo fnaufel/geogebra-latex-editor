@@ -1,6 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { AuthoringWorkspace, type WorkspaceAdapter } from "../../src/workspace";
-import type { ConstructionEvent, ManagedText } from "../../src/geogebra";
+import {
+  ApplyFailure,
+  type ConstructionEvent,
+  type ManagedText,
+} from "../../src/geogebra";
 
 afterEach(() => vi.useRealTimers());
 
@@ -262,6 +266,78 @@ it("resynchronizes Applied Source after history without replacing a Diverged Dra
   expect(workspace.currentSource).toBe("after redo");
 });
 
+it("refreshes an unpinned target after history while preserving its real drafts", async () => {
+  vi.useFakeTimers();
+  const first: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "first applied",
+    simplify: true,
+    compiledFingerprint: "first",
+  };
+  const second: ManagedText = {
+    id: "two",
+    targetLabel: "text2",
+    source: "second applied",
+    simplify: true,
+    compiledFingerprint: "second",
+  };
+  let texts = [first, second];
+  let emit: (event: ConstructionEvent) => void = () => {};
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => [],
+    createManagedText: async () => first,
+    applyManagedText: async () => first,
+    importBase64: async () => {},
+    getManagedTexts: () => texts,
+    exportBase64: async () => "file",
+    onEvent: (listener) => {
+      emit = listener;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  emit({
+    kind: "selection",
+    selected: [{ label: "text2", type: "text", defined: true }],
+  });
+  workspace.editSelectedText();
+  texts = [
+    { ...first, source: "first after undo", compiledFingerprint: "undo" },
+    second,
+  ];
+  emit({ kind: "undo" });
+  await vi.runAllTimersAsync();
+  emit({
+    kind: "selection",
+    selected: [{ label: "text1", type: "text", defined: true }],
+  });
+  workspace.editSelectedText();
+  expect(workspace.currentSource).toBe("first after undo");
+  expect(workspace.hasDraft).toBe(false);
+  workspace.setSource("my first draft");
+  emit({
+    kind: "selection",
+    selected: [{ label: "text2", type: "text", defined: true }],
+  });
+  workspace.editSelectedText();
+  texts = [
+    { ...first, source: "first after redo", compiledFingerprint: "redo" },
+    second,
+  ];
+  emit({ kind: "redo" });
+  await vi.runAllTimersAsync();
+  emit({
+    kind: "selection",
+    selected: [{ label: "text1", type: "text", defined: true }],
+  });
+  workspace.editSelectedText();
+  expect(workspace.currentSource).toBe("my first draft");
+  expect(workspace.target?.source).toBe("first after redo");
+  expect(workspace.diverged).toBe(true);
+});
+
 it("retains Draft Source when compilation or adapter Apply fails", async () => {
   const applied: ManagedText = {
     id: "one",
@@ -292,4 +368,31 @@ it("retains Draft Source when compilation or adapter Apply fails", async () => {
   expect(workspace.currentSource).toBe("new draft");
   expect(workspace.target?.source).toBe("old");
   expect(workspace.hasDraft).toBe(true);
+});
+
+it("keeps Apply failure diagnostics with workspace state until the draft is discarded", async () => {
+  const text: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "old",
+    simplify: true,
+    compiledFingerprint: "old",
+  };
+  const { workspace } = fakeWorkspace([text]);
+  await workspace.create();
+  workspace.setSource("my draft");
+  workspace.reportActionError(
+    new ApplyFailure(
+      "APPLY_ROLLED_BACK",
+      "Apply failed; Draft Source was retained.",
+      "APPLY_METADATA_FAILED",
+    ),
+    false,
+  );
+  expect(workspace.actionError).toContain(
+    "[APPLY_ROLLED_BACK/APPLY_METADATA_FAILED]",
+  );
+  expect(workspace.currentSource).toBe("my draft");
+  workspace.discardDraft();
+  expect(workspace.actionError).toBeNull();
 });

@@ -1,10 +1,5 @@
 import { mountAuthoringEditor } from "./editor";
-import {
-  ApplyFailure,
-  AppletState,
-  GeoGebraAdapter,
-  GEOGEBRA_VERSION,
-} from "./geogebra";
+import { AppletState, GeoGebraAdapter, GEOGEBRA_VERSION } from "./geogebra";
 import "./style.css";
 
 const root = document.querySelector<HTMLDivElement>("#app");
@@ -57,6 +52,7 @@ root.innerHTML = `
           <button id="apply" type="button" disabled>Apply</button>
           <button id="reapply" type="button" hidden>Reapply Draft</button>
           <button id="discard-draft" type="button" hidden>Discard Draft</button>
+          <button id="recover-failed-apply" type="button" hidden disabled>Restore failed Apply draft</button>
         </div>
         <p id="applied-source-label" hidden>Applied Source:</p>
         <pre id="applied-source" hidden></pre>
@@ -112,17 +108,20 @@ const cancelInsertion = required<HTMLButtonElement>("#cancel-insertion");
 const applyButton = required<HTMLButtonElement>("#apply");
 const reapplyButton = required<HTMLButtonElement>("#reapply");
 const discardDraftButton = required<HTMLButtonElement>("#discard-draft");
+const recoverFailedApplyButton = required<HTMLButtonElement>(
+  "#recover-failed-apply",
+);
 const appliedSourceLabel = required<HTMLElement>("#applied-source-label");
 const appliedSource = required<HTMLElement>("#applied-source");
 let refreshSymbols = () => {};
 let insertionActive = false;
-let actionError: string | null = null;
 
 function renderAppletState(state: AppletState): void {
   const ready = state.kind === "ready";
   newManagedText.disabled = !ready;
   openFile.disabled = !ready;
   downloadFile.disabled = !ready;
+  recoverFailedApplyButton.disabled = !ready;
   notice.hidden = state.kind === "ready";
   retry.hidden =
     state.kind === "idle" || state.kind === "loading" || state.kind === "ready";
@@ -163,6 +162,8 @@ const authoring = mountAuthoringEditor(
     selectionMessage,
     insertionMode,
     interactionMessage,
+    actionError,
+    recoveryAvailable,
   }) => {
     targetLabel.textContent = target
       ? `Editing Target: ${target.targetLabel}`
@@ -175,12 +176,15 @@ const authoring = mountAuthoringEditor(
             ? "Diverged Draft: Applied Source changed in GeoGebra. Reapply or discard this draft."
             : "Draft Source has unapplied changes."
           : "Applied Source is current."
-        : "No text is open for editing.");
+        : recoveryAvailable
+          ? "A failed Apply snapshot and Draft Source are available to restore."
+          : "No text is open for editing.");
     applyButton.disabled = !target || !hasDraft || !canApply;
     applyButton.hidden = diverged;
     reapplyButton.hidden = !diverged;
     reapplyButton.disabled = !canApply;
     discardDraftButton.hidden = !diverged;
+    recoverFailedApplyButton.hidden = !recoveryAvailable;
     appliedSourceLabel.hidden = !diverged;
     appliedSource.hidden = !diverged;
     appliedSource.textContent = diverged ? (target?.source ?? "") : "";
@@ -195,18 +199,12 @@ const authoring = mountAuthoringEditor(
 );
 refreshSymbols = authoring.refreshSymbols;
 
-function reportActionError(error: unknown): void {
-  actionError =
-    error instanceof ApplyFailure
-      ? `[${error.code}${error.reason ? `/${error.reason}` : ""}] ${error.message}${adapter.hasRecoverableApplySnapshot ? " Download the current construction if possible, then reload before applying again." : ""}`
-      : error instanceof Error
-        ? error.message
-        : "GeoGebra action failed.";
-  targetState.textContent = actionError;
+function reportActionError(error: unknown): Promise<void> {
+  return authoring.reportActionError(error);
 }
 
 newManagedText.addEventListener("click", () => {
-  actionError = null;
+  authoring.clearActionError();
   void authoring.create().catch(reportActionError);
 });
 editSelected.addEventListener("click", () => authoring.editSelectedText());
@@ -218,19 +216,21 @@ window.addEventListener("keydown", (event) => {
   authoring.cancelInsertion();
 });
 function applyDraft(): void {
-  void authoring
-    .apply()
-    .then(() => {
-      actionError = null;
-      targetState.textContent = "Applied Source is current.";
-    })
-    .catch(reportActionError);
+  void authoring.apply().catch(reportActionError);
 }
 applyButton.addEventListener("click", applyDraft);
 reapplyButton.addEventListener("click", applyDraft);
 discardDraftButton.addEventListener("click", () => {
-  actionError = null;
   authoring.discardDraft();
+});
+recoverFailedApplyButton.addEventListener("click", () => {
+  if (
+    !window.confirm(
+      "Restore the construction and Draft Source from the failed Apply? Current construction changes will be replaced.",
+    )
+  )
+    return;
+  void authoring.recoverFailedApply().catch(reportActionError);
 });
 openFile.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", () => {
@@ -247,7 +247,7 @@ fileInput.addEventListener("change", () => {
     const bytes = new Uint8Array(await file.arrayBuffer());
     let binary = "";
     for (const byte of bytes) binary += String.fromCharCode(byte);
-    actionError = null;
+    authoring.clearActionError();
     await authoring.open(btoa(binary));
     filename.textContent = file.name.replace(/\.ggb$/i, "") + "-edited.ggb";
     refreshSymbols();
