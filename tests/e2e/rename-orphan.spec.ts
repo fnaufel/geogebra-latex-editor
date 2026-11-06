@@ -81,6 +81,48 @@ test("external metadata replacement reports uncertainty and retains in-tab sourc
   ).toBeDisabled();
 });
 
+test("replacing a metadata record under the same ID retains the previous source", async ({
+  page,
+}) => {
+  test.slow();
+  await page.goto("./");
+  await expect(
+    page.getByRole("status", { name: "Applet status" }),
+  ).toContainText("GeoGebra ready", { timeout: 90_000 });
+  await page.getByRole("button", { name: "New Managed Text" }).click();
+  const editor = page.getByRole("textbox", { name: "Authoring Source" });
+  await editor.fill("precious source");
+  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await expect(page.locator("#target-state")).toHaveText(
+    "Applied Source is current.",
+  );
+  await page.evaluate(() => {
+    const api = (window as typeof window & { ggbApplet: LiveApplet }).ggbApplet;
+    const encoded = api.getValueString("gglatexEditorMetadataV1");
+    const metadata = JSON.parse(
+      atob(encoded.replace(/-/g, "+").replace(/_/g, "/")),
+    ) as {
+      documents: Record<
+        string,
+        { source: string; compiledFingerprint: string }
+      >;
+    };
+    const document = Object.values(metadata.documents)[0]!;
+    document.source = "foreign source";
+    document.compiledFingerprint = "sha256:foreign";
+    const replacement = btoa(JSON.stringify(metadata))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+    api.evalCommand(`gglatexEditorMetadataV1="${replacement}"`);
+  });
+  await expect(page.locator("#target-label")).toContainText("Orphaned Source");
+  await expect(editor).toHaveText("precious source");
+  await expect(page.locator("#interaction-state")).toContainText(
+    "identity is uncertain",
+  );
+});
+
 test("reference rename and undo keep source metadata and draft coherent", async ({
   page,
 }) => {
@@ -145,6 +187,16 @@ test("reference rename and undo keep source metadata and draft coherent", async 
       ),
     )
     .toBe(true);
+  await editor.fill("draft @b@");
+  await page.evaluate(() =>
+    (window as typeof window & { ggbApplet: LiveApplet }).ggbApplet.undo(),
+  );
+  await expect(editor).toHaveText("draft @a@");
+  await expect(page.locator("#target-state")).not.toContainText("Diverged");
+  await page.evaluate(() =>
+    (window as typeof window & { ggbApplet: LiveApplet }).ggbApplet.redo(),
+  );
+  await expect(editor).toHaveText("draft @b@");
 });
 
 test("target deletion retains Orphaned Source and restores a new managed target", async ({

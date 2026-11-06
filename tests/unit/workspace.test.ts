@@ -626,3 +626,101 @@ it("preserves Orphaned Source on target deletion, reattaches on undo, and restor
   expect(workspace.target?.targetLabel).toBe("text2");
   expect(workspace.currentSource).toBe("my draft");
 });
+
+it("retains Applied Source when external metadata replaces the pinned record", async () => {
+  vi.useFakeTimers();
+  const original: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "precious source",
+    simplify: true,
+    compiledFingerprint: "sha256:original",
+  };
+  const texts = [original];
+  const { workspace, emit } = fakeWorkspace(texts);
+  await workspace.create();
+  texts[0] = {
+    ...original,
+    source: "external replacement",
+    compiledFingerprint: "sha256:replacement",
+  };
+  emit({
+    kind: "object",
+    change: "update",
+    label: "gglatexEditorMetadataV1",
+  });
+  await vi.runAllTimersAsync();
+  expect(workspace.target).toBeNull();
+  expect(workspace.orphanedTarget).toMatchObject(original);
+  expect(workspace.currentSource).toBe("precious source");
+  expect(workspace.canRestoreOrphaned).toBe(false);
+  expect(workspace.interactionMessage).toContain("identity is uncertain");
+  emit({ kind: "object", change: "update", label: "text1" });
+  await vi.runAllTimersAsync();
+  expect(workspace.target).toBeNull();
+  expect(workspace.currentSource).toBe("precious source");
+});
+
+it("undoes and redoes a reference rename in the retained Draft Source", async () => {
+  vi.useFakeTimers();
+  const original: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "@a@",
+    simplify: true,
+    compiledFingerprint: "sha256:original",
+  };
+  let applied = original;
+  let symbols = [
+    { label: "a", type: "number", defined: true },
+    { label: "text1", type: "text", defined: true },
+  ];
+  let emit: (event: ConstructionEvent) => void = () => {};
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => symbols,
+    getUnmanagedTextSnapshot: () => "",
+    adoptUnmanagedText: async () => applied,
+    createManagedText: async () => applied,
+    applyManagedText: async () => applied,
+    importBase64: async () => {},
+    getManagedTexts: () => [applied],
+    exportBase64: async () => "",
+    onEvent: (listener) => {
+      emit = listener;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  workspace.setSource("draft @a@");
+  symbols = [{ ...symbols[0]!, label: "b" }, symbols[1]!];
+  applied = {
+    ...original,
+    source: "@b@",
+    compiledFingerprint: "sha256:renamed",
+  };
+  emit({ kind: "rename", oldLabel: "a", label: "b" });
+  await vi.runAllTimersAsync();
+  expect(workspace.currentSource).toBe("draft @b@");
+  expect(workspace.diverged).toBe(false);
+
+  symbols = [{ ...symbols[0]!, label: "a" }, symbols[1]!];
+  applied = original;
+  emit({ kind: "undo" });
+  await vi.runAllTimersAsync();
+  expect(workspace.currentSource).toBe("draft @a@");
+  expect(workspace.diverged).toBe(false);
+  expect(workspace.result.diagnostics).toEqual([]);
+
+  symbols = [{ ...symbols[0]!, label: "b" }, symbols[1]!];
+  applied = {
+    ...original,
+    source: "@b@",
+    compiledFingerprint: "sha256:renamed",
+  };
+  emit({ kind: "redo" });
+  await vi.runAllTimersAsync();
+  expect(workspace.currentSource).toBe("draft @b@");
+  expect(workspace.diverged).toBe(false);
+  expect(workspace.result.diagnostics).toEqual([]);
+});

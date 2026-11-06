@@ -73,6 +73,9 @@ export class AuthoringWorkspace {
   private resyncTimer: ReturnType<typeof setTimeout> | undefined;
   private renamePending = false;
   private historyPending = false;
+  private historyAction: "undo" | "redo" | null = null;
+  private historySymbolsBefore: readonly SymbolInfo[] | null = null;
+  private readonly recentRenames: { oldLabel: string; label: string }[] = [];
   private manualRenameRanges: SourceRange[] = [];
   private insertionRange: { from: number; to: number } | null = null;
   private insertionQueued = false;
@@ -280,6 +283,36 @@ export class AuthoringWorkspace {
     this.notify(this.compiled);
   }
 
+  private rewriteRetainedReferences(
+    oldLabel: string,
+    label: string,
+    symbols: readonly SymbolInfo[],
+  ): void {
+    for (const [id, draft] of this.drafts) {
+      const rewritten = rewriteGlobalReferences(
+        draft.source,
+        oldLabel,
+        label,
+        symbols,
+      );
+      this.drafts.set(id, { ...draft, source: rewritten.source });
+      if (this.editingTarget?.id === id) {
+        this.source = rewritten.source;
+        this.manualRenameRanges = rewritten.ambiguous;
+      }
+    }
+    for (const [id, baseline] of this.draftBaselines)
+      this.draftBaselines.set(id, {
+        ...baseline,
+        source: rewriteGlobalReferences(
+          baseline.source,
+          oldLabel,
+          label,
+          symbols,
+        ).source,
+      });
+  }
+
   private handleEvent(event: ConstructionEvent): void {
     if (event.kind === "metadata-error") {
       this.actionErrorMessage = event.message;
@@ -330,30 +363,9 @@ export class AuthoringWorkspace {
         ...afterSymbols.filter((symbol) => symbol.label !== event.label),
         ...(renamed ? [{ ...renamed, label: event.oldLabel }] : []),
       ];
-      for (const [id, draft] of this.drafts) {
-        const rewritten = rewriteGlobalReferences(
-          draft.source,
-          event.oldLabel,
-          event.label,
-          oldSymbols,
-        );
-        this.drafts.set(id, { ...draft, source: rewritten.source });
-        if (this.editingTarget?.id === id) {
-          this.source = rewritten.source;
-          this.manualRenameRanges = rewritten.ambiguous;
-        }
-      }
-      for (const [id, baseline] of this.draftBaselines) {
-        this.draftBaselines.set(id, {
-          ...baseline,
-          source: rewriteGlobalReferences(
-            baseline.source,
-            event.oldLabel,
-            event.label,
-            oldSymbols,
-          ).source,
-        });
-      }
+      this.rewriteRetainedReferences(event.oldLabel, event.label, oldSymbols);
+      this.recentRenames.push({ oldLabel: event.oldLabel, label: event.label });
+      if (this.recentRenames.length > 50) this.recentRenames.shift();
       this.selected = this.selected.map((symbol) =>
         symbol.label === event.oldLabel
           ? { ...symbol, label: event.label }
@@ -361,8 +373,11 @@ export class AuthoringWorkspace {
       );
       this.renamePending = true;
     }
-    if (event.kind === "undo" || event.kind === "redo")
+    if (event.kind === "undo" || event.kind === "redo") {
       this.historyPending = true;
+      this.historyAction = event.kind;
+      this.historySymbolsBefore ??= this.symbols;
+    }
     if (
       event.kind === "object" ||
       event.kind === "rename" ||
@@ -389,8 +404,61 @@ export class AuthoringWorkspace {
     await this.adapter?.reconcileMetadata?.(false);
     const current = this.editingTarget;
     const managed = this.adapter?.getManagedTexts() ?? [];
+    if (this.historyAction && this.historySymbolsBefore) {
+      const before = new Set(
+        this.historySymbolsBefore.map(({ label }) => label),
+      );
+      const after = new Set(
+        (this.adapter?.getSymbols() ?? []).map(({ label }) => label),
+      );
+      const rename = [...this.recentRenames]
+        .reverse()
+        .find(({ oldLabel, label }) =>
+          this.historyAction === "undo"
+            ? before.has(label) &&
+              !before.has(oldLabel) &&
+              after.has(oldLabel) &&
+              !after.has(label)
+            : before.has(oldLabel) &&
+              !before.has(label) &&
+              after.has(label) &&
+              !after.has(oldLabel),
+        );
+      if (rename) {
+        const oldLabel =
+          this.historyAction === "undo" ? rename.label : rename.oldLabel;
+        const label =
+          this.historyAction === "undo" ? rename.oldLabel : rename.label;
+        this.rewriteRetainedReferences(
+          oldLabel,
+          label,
+          this.historySymbolsBefore,
+        );
+        for (const [id, baseline] of this.draftBaselines) {
+          const applied = managed.find((text) => text.id === id);
+          if (
+            applied &&
+            baseline.source === applied.source &&
+            baseline.simplify === applied.simplify
+          )
+            this.draftBaselines.set(id, {
+              ...baseline,
+              compiledFingerprint: applied.compiledFingerprint,
+            });
+        }
+        this.selected = this.selected.map((symbol) =>
+          symbol.label === oldLabel ? { ...symbol, label } : symbol,
+        );
+      }
+    }
     if (this.orphaned) {
-      const reattached = managed.find((text) => text.id === this.orphaned?.id);
+      const reattached = managed.find(
+        (text) =>
+          text.id === this.orphaned?.id &&
+          text.source === this.orphaned.source &&
+          text.simplify === this.orphaned.simplify &&
+          text.compiledFingerprint === this.orphaned.compiledFingerprint,
+      );
       if (reattached) this.loadTarget(reattached);
       else
         this.orphaned =
@@ -399,7 +467,16 @@ export class AuthoringWorkspace {
             .find((text) => text.id === this.orphaned?.id) ?? this.orphaned;
     }
     const applied = managed.find((text) => text.id === current?.id);
-    if (current && applied) {
+    const externallyReplaced =
+      current &&
+      applied &&
+      !this.renamePending &&
+      !this.historyPending &&
+      (current.source !== applied.source ||
+        current.simplify !== applied.simplify ||
+        current.compiledFingerprint !== applied.compiledFingerprint ||
+        current.targetLabel !== applied.targetLabel);
+    if (current && applied && !externallyReplaced) {
       const dirty = this.hasDraft;
       this.editingTarget = applied;
       if (this.renamePending) {
@@ -449,11 +526,13 @@ export class AuthoringWorkspace {
         candidates: [],
       };
       this.editingTarget = null;
-      this.message = this.adapter
-        ?.getSymbols()
-        .some((symbol) => symbol.label === current.targetLabel)
-        ? `Authoring Source metadata changed externally. Source is retained in this tab; target identity is uncertain.`
-        : `${current.targetLabel} was deleted. Its Authoring Source is retained as Orphaned Source.`;
+      this.message =
+        externallyReplaced ||
+        this.adapter
+          ?.getSymbols()
+          .some((symbol) => symbol.label === current.targetLabel)
+          ? `Authoring Source metadata changed externally. Source is retained in this tab; target identity is uncertain.`
+          : `${current.targetLabel} was deleted. Its Authoring Source is retained as Orphaned Source.`;
     } else if (this.unmanaged) {
       const restored = managed.find(
         (text) => text.targetLabel === this.unmanaged?.label,
@@ -480,6 +559,8 @@ export class AuthoringWorkspace {
     this.symbols = this.adapter?.getSymbols() ?? this.symbols;
     this.renamePending = false;
     this.historyPending = false;
+    this.historyAction = null;
+    this.historySymbolsBefore = null;
     this.validateNow();
   }
 
