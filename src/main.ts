@@ -44,7 +44,14 @@ root.innerHTML = `
       <div class="editor-intro">
         <strong id="target-label">No Editing Target</strong>
         <p id="target-state">No text is open for editing.</p>
-        <button id="apply" type="button" disabled>Apply</button>
+        <p id="selection-state" role="status" aria-live="polite">Select one text object in GeoGebra, then choose Edit selected text.</p>
+        <div class="editor-actions">
+          <button id="edit-selected" type="button" disabled>Edit selected text</button>
+          <button id="insert-object" type="button" disabled>Insert Object</button>
+          <button id="cancel-insertion" type="button" hidden>Cancel insertion</button>
+          <button id="apply" type="button" disabled>Apply</button>
+        </div>
+        <p id="interaction-state" role="status" aria-live="polite"></p>
       </div>
       <div id="editor" class="editor-host" aria-label="Authoring Source editor"></div>
       <div class="editor-feedback">
@@ -88,8 +95,14 @@ const downloadFile = required<HTMLButtonElement>("#download-file");
 const filename = required<HTMLElement>("#filename");
 const targetLabel = required<HTMLElement>("#target-label");
 const targetState = required<HTMLElement>("#target-state");
+const selectionState = required<HTMLElement>("#selection-state");
+const interactionState = required<HTMLElement>("#interaction-state");
+const editSelected = required<HTMLButtonElement>("#edit-selected");
+const insertObject = required<HTMLButtonElement>("#insert-object");
+const cancelInsertion = required<HTMLButtonElement>("#cancel-insertion");
 const applyButton = required<HTMLButtonElement>("#apply");
 let refreshSymbols = () => {};
+let insertionActive = false;
 
 function renderAppletState(state: AppletState): void {
   const ready = state.kind === "ready";
@@ -127,7 +140,15 @@ const authoring = mountAuthoringEditor(
   required<HTMLInputElement>("#simplify"),
   required<HTMLButtonElement>("#copy-definition"),
   adapter,
-  (target, hasDraft, canApply) => {
+  ({
+    target,
+    hasDraft,
+    canApply,
+    canEditSelection,
+    selectionMessage,
+    insertionMode,
+    interactionMessage,
+  }) => {
     targetLabel.textContent = target
       ? `Editing Target: ${target.targetLabel}`
       : "No Editing Target";
@@ -137,6 +158,13 @@ const authoring = mountAuthoringEditor(
         : "Applied Source is current."
       : "No text is open for editing.";
     applyButton.disabled = !target || !hasDraft || !canApply;
+    selectionState.textContent = selectionMessage;
+    interactionState.textContent = interactionMessage;
+    editSelected.disabled = !canEditSelection || adapter.state.kind !== "ready";
+    insertObject.disabled =
+      !target || insertionMode || adapter.state.kind !== "ready";
+    cancelInsertion.hidden = !insertionMode;
+    insertionActive = insertionMode;
   },
 );
 refreshSymbols = authoring.refreshSymbols;
@@ -149,6 +177,14 @@ function reportActionError(error: unknown): void {
 newManagedText.addEventListener("click", () => {
   void authoring.create().catch(reportActionError);
 });
+editSelected.addEventListener("click", () => authoring.editSelectedText());
+insertObject.addEventListener("click", () => authoring.startInsertion());
+cancelInsertion.addEventListener("click", () => authoring.cancelInsertion());
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !insertionActive) return;
+  event.preventDefault();
+  authoring.cancelInsertion();
+});
 applyButton.addEventListener("click", () => {
   void authoring.apply().catch(reportActionError);
 });
@@ -158,7 +194,7 @@ fileInput.addEventListener("change", () => {
   if (!file) return;
   void (async () => {
     if (
-      authoring.hasDraft() &&
+      authoring.hasAnyDraft() &&
       !window.confirm(
         "Discard unapplied Draft Source and open another construction?",
       )
@@ -179,7 +215,7 @@ fileInput.addEventListener("change", () => {
 downloadFile.addEventListener("click", () => {
   void (async () => {
     if (
-      authoring.hasDraft() &&
+      authoring.hasAnyDraft() &&
       !window.confirm(
         "Download Applied State only? Unapplied Draft Source will stay in the editor.",
       )

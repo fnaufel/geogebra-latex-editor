@@ -23,6 +23,16 @@ import {
 import { AuthoringWorkspace } from "./workspace";
 import type { GeoGebraAdapter, ManagedText } from "./geogebra";
 
+export interface AuthoringUiState {
+  target: ManagedText | null;
+  hasDraft: boolean;
+  canApply: boolean;
+  canEditSelection: boolean;
+  selectionMessage: string;
+  insertionMode: boolean;
+  interactionMessage: string;
+}
+
 const LATEX_COMPLETIONS = [
   "\\frac",
   "\\sqrt",
@@ -59,6 +69,7 @@ function sourceCompletion(
         ...symbols().map((symbol) => ({
           label: symbol.label,
           type: "variable",
+          detail: `${symbol.type} · ${symbol.defined ? "defined" : "undefined"}`,
         })),
         ...Object.keys(SAFE_COMMANDS).map((label) => ({
           label,
@@ -130,11 +141,7 @@ export function mountAuthoringEditor(
   simplifyInput: HTMLInputElement,
   copyButton: HTMLButtonElement,
   adapter: GeoGebraAdapter,
-  onState: (
-    target: ManagedText | null,
-    hasDraft: boolean,
-    canApply: boolean,
-  ) => void,
+  onState: (state: AuthoringUiState) => void,
 ): {
   refreshSymbols: () => void;
   create: () => Promise<ManagedText>;
@@ -142,9 +149,25 @@ export function mountAuthoringEditor(
   open: (base64: string) => Promise<ManagedText | null>;
   exportBase64: () => Promise<string>;
   hasDraft: () => boolean;
+  hasAnyDraft: () => boolean;
+  editSelectedText: () => boolean;
+  startInsertion: () => void;
+  cancelInsertion: () => void;
 } {
   const getSymbols = () => adapter.getSymbols();
   let replacing = false;
+  let shownId: string | null = null;
+  const states = new Map<string, EditorState>();
+  const emitState = (canApply = workspace.result.expression !== null) =>
+    onState({
+      target: workspace.target,
+      hasDraft: workspace.hasDraft,
+      canApply,
+      canEditSelection: workspace.canEditSelection,
+      selectionMessage: workspace.selectionMessage,
+      insertionMode: workspace.insertionMode,
+      interactionMessage: workspace.interactionMessage,
+    });
   const render = (result: CompileResult) => {
     compiledHost.textContent =
       result.expression ?? "No definition while errors remain.";
@@ -181,33 +204,46 @@ export function mountAuthoringEditor(
       ),
     );
     if (view.hasFocus) startCompletion(view);
-    onState(workspace.target, workspace.hasDraft, result.expression !== null);
+    emitState(result.expression !== null);
   };
-  const workspace = new AuthoringWorkspace(render, adapter);
-  const view = new EditorView({
-    state: EditorState.create({
-      extensions: [
-        basicSetup,
-        EditorView.lineWrapping,
-        EditorView.contentAttributes.of({ "aria-label": "Authoring Source" }),
-        highlighting,
-        autocompletion({
-          activateOnTyping: false,
-          override: [(context) => sourceCompletion(context, getSymbols)],
-        }),
-        EditorView.updateListener.of((update) => {
-          if (!update.docChanged || replacing) return;
-          workspace.setSource(update.state.doc.toString());
-          workspace.setSymbols(getSymbols());
-          onState(workspace.target, workspace.hasDraft, false);
-        }),
+  const workspace = new AuthoringWorkspace(
+    render,
+    adapter,
+    (from, to, text) => {
+      replacing = true;
+      view.dispatch({
+        changes: { from, to, insert: text },
+        selection: { anchor: from + text.length },
+      });
+      replacing = false;
+      view.focus();
+    },
+  );
+  const extensions = [
+    basicSetup,
+    EditorView.lineWrapping,
+    EditorView.contentAttributes.of({ "aria-label": "Authoring Source" }),
+    highlighting,
+    autocompletion({
+      activateOnTyping: false,
+      override: [
+        (context: CompletionContext) => sourceCompletion(context, getSymbols),
       ],
     }),
+    EditorView.updateListener.of((update: ViewUpdate) => {
+      if (!update.docChanged || replacing) return;
+      workspace.setSource(update.state.doc.toString());
+      workspace.setSymbols(getSymbols());
+      emitState(false);
+    }),
+  ];
+  const view = new EditorView({
+    state: EditorState.create({ extensions }),
     parent: editorHost,
   });
   simplifyInput.addEventListener("change", () => {
     workspace.setSimplify(simplifyInput.checked);
-    onState(workspace.target, workspace.hasDraft, false);
+    emitState(false);
   });
   copyButton.addEventListener("click", async () => {
     const definition = workspace.result.expression;
@@ -215,27 +251,28 @@ export function mountAuthoringEditor(
   });
   render(workspace.result);
   function showTarget(): void {
+    if (shownId) states.set(shownId, view.state);
+    const nextId = workspace.target?.id ?? null;
     replacing = true;
-    view.dispatch({
-      changes: {
-        from: 0,
-        to: view.state.doc.length,
-        insert: workspace.currentSource,
-      },
-    });
+    if (
+      nextId !== shownId ||
+      view.state.doc.toString() !== workspace.currentSource
+    )
+      view.setState(
+        nextId && states.has(nextId)
+          ? states.get(nextId)!
+          : EditorState.create({ doc: workspace.currentSource, extensions }),
+      );
+    shownId = nextId;
     replacing = false;
     simplifyInput.checked = workspace.currentSimplify;
-    onState(
-      workspace.target,
-      workspace.hasDraft,
-      workspace.result.expression !== null,
-    );
+    render(workspace.result);
     view.focus();
   }
   return {
     refreshSymbols: () => {
       workspace.setSymbols(getSymbols());
-      onState(workspace.target, workspace.hasDraft, false);
+      emitState(false);
     },
     create: async () => {
       const target = await workspace.create();
@@ -244,19 +281,31 @@ export function mountAuthoringEditor(
     },
     apply: async () => {
       const target = await workspace.apply();
-      onState(
-        workspace.target,
-        workspace.hasDraft,
-        workspace.result.expression !== null,
-      );
+      emitState();
       return target;
     },
     open: async (base64) => {
       const target = await workspace.open(base64);
+      states.clear();
+      shownId = null;
       showTarget();
       return target;
     },
     exportBase64: () => workspace.exportBase64(),
     hasDraft: () => workspace.hasDraft,
+    hasAnyDraft: () => workspace.hasAnyDraft,
+    editSelectedText: () => {
+      const pinned = workspace.editSelectedText();
+      if (pinned) showTarget();
+      return pinned;
+    },
+    startInsertion: () => {
+      const { from, to } = view.state.selection.main;
+      workspace.startInsertion(from, to);
+    },
+    cancelInsertion: () => {
+      workspace.cancelInsertion();
+      view.focus();
+    },
   };
 }

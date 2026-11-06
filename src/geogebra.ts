@@ -21,6 +21,29 @@ export type AppletState =
   | { kind: "version-mismatch"; actual: string }
   | { kind: "error"; message: string };
 
+export type ConstructionEvent =
+  | { kind: "selection"; selected: SymbolInfo[] }
+  | { kind: "object"; change: "add" | "update" | "remove"; label: string }
+  | { kind: "rename"; oldLabel: string; label: string }
+  | { kind: "clear" | "undo" | "redo" };
+
+function clientEvent(raw: unknown): { type: string; target: string } | null {
+  if (Array.isArray(raw)) {
+    const [type, target] = raw;
+    return typeof type === "string"
+      ? { type, target: typeof target === "string" ? target : "" }
+      : null;
+  }
+  if (!raw || typeof raw !== "object") return null;
+  const event = raw as Record<string, unknown>;
+  return typeof event.type === "string"
+    ? {
+        type: event.type,
+        target: typeof event.target === "string" ? event.target : "",
+      }
+    : null;
+}
+
 interface AppletApi {
   getVersion(): string;
   setWidth(width: number): void;
@@ -44,6 +67,14 @@ interface AppletApi {
   setUndoPoint?(): void;
   getBase64?(callback: (base64: string) => void): void;
   setBase64?(base64: string, callback: () => void): void;
+  registerAddListener?(listener: (label: string) => void): void;
+  registerUpdateListener?(listener: (label: string) => void): void;
+  registerRemoveListener?(listener: (label: string) => void): void;
+  registerRenameListener?(
+    listener: (oldLabel: string, label: string) => void,
+  ): void;
+  registerClearListener?(listener: () => void): void;
+  registerClientListener?(listener: (event: unknown) => void): void;
 }
 
 export interface ManagedText extends ManagedDocument {
@@ -109,6 +140,8 @@ export class GeoGebraAdapter {
   private currentState: AppletState = { kind: "idle" };
   private api: AppletApi | undefined;
   private generation = 0;
+  private readonly listeners = new Set<(event: ConstructionEvent) => void>();
+  private readonly selectedLabels = new Set<string>();
 
   constructor(
     element: HTMLElement,
@@ -124,10 +157,68 @@ export class GeoGebraAdapter {
     return this.currentState;
   }
 
+  onEvent(listener: (event: ConstructionEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(event: ConstructionEvent): void {
+    for (const listener of this.listeners) listener(event);
+  }
+
+  private selectionChanged(): void {
+    const symbols = this.getSymbols();
+    this.emit({
+      kind: "selection",
+      selected: [...this.selectedLabels]
+        .map((label) => symbols.find((symbol) => symbol.label === label))
+        .filter((symbol): symbol is SymbolInfo => !!symbol),
+    });
+  }
+
+  private registerListeners(api: AppletApi): void {
+    api.registerAddListener?.((label) =>
+      this.emit({ kind: "object", change: "add", label }),
+    );
+    api.registerUpdateListener?.((label) =>
+      this.emit({ kind: "object", change: "update", label }),
+    );
+    api.registerRemoveListener?.((label) => {
+      this.selectedLabels.delete(label);
+      this.emit({ kind: "object", change: "remove", label });
+      this.selectionChanged();
+    });
+    api.registerRenameListener?.((oldLabel, label) => {
+      if (this.selectedLabels.delete(oldLabel)) this.selectedLabels.add(label);
+      this.emit({ kind: "rename", oldLabel, label });
+      this.selectionChanged();
+    });
+    api.registerClearListener?.(() => {
+      this.selectedLabels.clear();
+      this.emit({ kind: "clear" });
+      this.selectionChanged();
+    });
+    api.registerClientListener?.((raw) => {
+      const event = clientEvent(raw);
+      if (!event) return;
+      if (event.type === "select" && event.target) {
+        this.selectedLabels.add(event.target);
+        this.selectionChanged();
+      } else if (event.type === "deselect") {
+        if (event.target) this.selectedLabels.delete(event.target);
+        else this.selectedLabels.clear();
+        this.selectionChanged();
+      } else if (event.type === "undo" || event.type === "redo") {
+        this.emit({ kind: event.type });
+      }
+    });
+  }
+
   async start(): Promise<void> {
     const generation = ++this.generation;
     this.api?.remove?.();
     this.api = undefined;
+    this.selectedLabels.clear();
     this.element.replaceChildren();
     this.changeState({ kind: "loading" });
 
@@ -173,6 +264,7 @@ export class GeoGebraAdapter {
                     return;
                   }
                   this.api = api;
+                  this.registerListeners(api);
                   this.resize();
                   finish({ kind: "ready", version: actual });
                 } catch (error) {
@@ -215,11 +307,16 @@ export class GeoGebraAdapter {
   getSymbols(): SymbolInfo[] {
     if (!this.api?.getAllObjectNames) return [];
     try {
-      return this.api.getAllObjectNames().map((label) => ({
-        label,
-        type: this.api?.getObjectType?.(label) ?? "unknown",
-        defined: this.api?.isDefined?.(label) ?? true,
-      }));
+      const metadataLabel =
+        this.currentState.kind === "ready" ? this.metadata().label : null;
+      return this.api
+        .getAllObjectNames()
+        .filter((label) => label !== metadataLabel)
+        .map((label) => ({
+          label,
+          type: this.api?.getObjectType?.(label) ?? "unknown",
+          defined: this.api?.isDefined?.(label) ?? true,
+        }));
     } catch {
       return [];
     }

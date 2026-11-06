@@ -208,3 +208,94 @@ it("keeps Applied Source intact when GeoGebra rejects a new definition", async (
   ).rejects.toThrow("Apply rollback failed.");
   expect(adapter.getManagedTexts()[0]?.source).toBe("old");
 });
+
+it("normalizes documented object events and live array events into one selection model", async () => {
+  const callbacks: Record<string, (...args: never[]) => void> = {};
+  const labels = ["text1", "a", "gglatexEditorMetadataV1"];
+  const api = {
+    getVersion: () => GEOGEBRA_VERSION,
+    setWidth: () => {},
+    setHeight: () => {},
+    getAllObjectNames: () => labels,
+    getObjectType: (label: string) => (label === "a" ? "numeric" : "text"),
+    getValueString: () => encodeMetadata(emptyMetadata()),
+    isDefined: () => true,
+    registerClientListener: (listener: (...args: never[]) => void) => {
+      callbacks.client = listener;
+    },
+    registerAddListener: (listener: (...args: never[]) => void) => {
+      callbacks.add = listener;
+    },
+    registerUpdateListener: (listener: (...args: never[]) => void) => {
+      callbacks.update = listener;
+    },
+    registerRemoveListener: (listener: (...args: never[]) => void) => {
+      callbacks.remove = listener;
+    },
+    registerRenameListener: (listener: (...args: never[]) => void) => {
+      callbacks.rename = listener;
+    },
+    registerClearListener: (listener: (...args: never[]) => void) => {
+      callbacks.clear = listener;
+    },
+  };
+  vi.stubGlobal(
+    "GGBApplet",
+    class {
+      constructor(private params: Record<string, unknown>) {}
+      setHTML5Codebase() {}
+      inject() {
+        (this.params.appletOnLoad as (api: unknown) => void)(api);
+      }
+    },
+  );
+  const adapter = new GeoGebraAdapter(
+    document.createElement("div"),
+    () => {},
+    async () => {},
+  );
+  const events: unknown[] = [];
+  adapter.onEvent((event) => events.push(event));
+  await adapter.start();
+  expect(adapter.getSymbols().map((symbol) => symbol.label)).toEqual([
+    "text1",
+    "a",
+  ]);
+  callbacks.client?.({ type: "select", target: "text1" } as never);
+  callbacks.client?.(["select", "a", ""] as never);
+  expect(events.at(-1)).toEqual({
+    kind: "selection",
+    selected: [
+      { label: "text1", type: "text", defined: true },
+      { label: "a", type: "numeric", defined: true },
+    ],
+  });
+  callbacks.client?.(["deselect", "text1"] as never);
+  expect(events.at(-1)).toEqual({
+    kind: "selection",
+    selected: [{ label: "a", type: "numeric", defined: true }],
+  });
+  callbacks.add?.("b" as never);
+  callbacks.update?.("a" as never);
+  callbacks.rename?.("a" as never, "b" as never);
+  callbacks.remove?.("b" as never);
+  callbacks.client?.(["undo", ""] as never);
+  callbacks.client?.({ type: "redo" } as never);
+  callbacks.clear?.();
+  expect(events).toContainEqual({ kind: "object", change: "add", label: "b" });
+  expect(events).toContainEqual({
+    kind: "object",
+    change: "update",
+    label: "a",
+  });
+  expect(events).toContainEqual({ kind: "rename", oldLabel: "a", label: "b" });
+  expect(events).toContainEqual({
+    kind: "object",
+    change: "remove",
+    label: "b",
+  });
+  expect(events).toContainEqual({ kind: "undo" });
+  expect(events).toContainEqual({ kind: "redo" });
+  expect(events).toContainEqual({ kind: "clear" });
+  expect(events.at(-1)).toEqual({ kind: "selection", selected: [] });
+});

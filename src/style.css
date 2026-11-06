@@ -222,6 +222,15 @@ button:hover {
 .editor-intro button {
   margin-top: 0.4rem;
 }
+.editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+#selection-state,
+#interaction-state {
+  min-height: 1.2em;
+}
 .editor-host {
   min-height: 8rem;
   flex: 1;
