@@ -16,12 +16,19 @@ test("creates, applies, downloads, reopens, and continues editing a Managed Text
   await expect(
     page.getByRole("checkbox", { name: "Clean signs and 1x coefficients" }),
   ).toBeChecked();
-  const source = 'λ✓漢字 "quoted" \\alpha\n\\text{C++}';
   const editor = page.getByRole("textbox", { name: "Authoring Source" });
+  await editor.fill("@missing@");
+  await expect(
+    page.getByRole("button", { name: "Apply", exact: true }),
+  ).toBeDisabled();
+  const source = 'λ✓漢字 "quoted" \\alpha\n\\text{C++} @1+2@';
   await editor.fill(source);
   await page.getByText("Advanced").click();
   await expect(page.getByLabel("Compiled Definition")).toContainText(
     "FormulaText(Simplify(",
+  );
+  await expect(page.getByLabel("Compiled Definition")).toContainText(
+    "FormulaText((1+2))",
   );
   await page
     .getByRole("checkbox", { name: "Clean signs and 1x coefficients" })
@@ -49,6 +56,7 @@ test("creates, applies, downloads, reopens, and continues editing a Managed Text
   expect(carrier).toContain('<fixed val="true"/>');
   expect(carrier).toContain('<selectionAllowed val="false"/>');
   expect(carrier).toContain('<auxiliary val="true"/>');
+  expect(xml).toMatch(/1\s*\+\s*2/);
   const reopened = await page.context().newPage();
   await reopened.goto("./");
   await expect(

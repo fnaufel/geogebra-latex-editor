@@ -30,11 +30,7 @@ it("keeps source and simplification as a draft until explicit Apply", async () =
     compiledFingerprint: "sha256:old",
   };
   const applyManagedText = vi.fn(
-    async (
-      _id: string,
-      source: string,
-      simplify: boolean,
-    ) => {
+    async (_id: string, source: string, simplify: boolean) => {
       applied = {
         ...applied,
         source,

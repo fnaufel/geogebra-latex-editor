@@ -127,7 +127,7 @@ const authoring = mountAuthoringEditor(
   required<HTMLInputElement>("#simplify"),
   required<HTMLButtonElement>("#copy-definition"),
   adapter,
-  (target, hasDraft) => {
+  (target, hasDraft, canApply) => {
     targetLabel.textContent = target
       ? `Editing Target: ${target.targetLabel}`
       : "No Editing Target";
@@ -136,7 +136,7 @@ const authoring = mountAuthoringEditor(
         ? "Draft Source has unapplied changes."
         : "Applied Source is current."
       : "No text is open for editing.";
-    applyButton.disabled = !target || !hasDraft;
+    applyButton.disabled = !target || !hasDraft || !canApply;
   },
 );
 refreshSymbols = authoring.refreshSymbols;

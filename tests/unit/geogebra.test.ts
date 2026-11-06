@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GeoGebraAdapter, GEOGEBRA_VERSION } from "../../src/geogebra";
+import { emptyMetadata, encodeMetadata } from "../../src/metadata";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -137,4 +138,73 @@ describe("GeoGebra applet lifecycle", () => {
     expect(adapter.state.kind).toBe("ready");
     expect(adapter.element).toBe(container);
   });
+});
+
+it("keeps Applied Source intact when GeoGebra rejects a new definition", async () => {
+  const envelope = emptyMetadata();
+  envelope.documents["document-1"] = {
+    targetLabel: "text1",
+    source: "old",
+    simplify: true,
+    compiledFingerprint: "sha256:old",
+  };
+  const encoded = encodeMetadata(envelope);
+  const commands: string[] = [];
+  let presentation = '<element label="text1"/>';
+  let corruptOnRestore = false;
+  const api = {
+    getVersion: () => GEOGEBRA_VERSION,
+    setWidth: () => {},
+    setHeight: () => {},
+    getAllObjectNames: () => ["text1", "gglatexEditorMetadataV1"],
+    getObjectType: () => "text",
+    getValueString: (label: string) =>
+      label === "gglatexEditorMetadataV1" ? encoded : "old",
+    getCommandString: () => 'LaTeX("old")',
+    getXML: (label?: string) => (label ? presentation : "<construction/>"),
+    setXML: () => {
+      if (corruptOnRestore)
+        presentation = '<element label="text1" color="red"/>';
+    },
+    evalCommand: (command: string) => {
+      commands.push(command);
+      return false;
+    },
+  };
+  vi.stubGlobal(
+    "GGBApplet",
+    class {
+      constructor(private params: Record<string, unknown>) {}
+      setHTML5Codebase() {}
+      inject() {
+        (this.params.appletOnLoad as (api: unknown) => void)(api);
+      }
+    },
+  );
+  const adapter = new GeoGebraAdapter(
+    document.createElement("div"),
+    () => {},
+    async () => {},
+  );
+  await adapter.start();
+  await expect(
+    adapter.applyManagedText(
+      "document-1",
+      "new",
+      true,
+      'FormulaText(Simplify("new"))',
+    ),
+  ).rejects.toThrow("Compiled Definition");
+  expect(adapter.getManagedTexts()[0]?.source).toBe("old");
+  expect(commands).toHaveLength(1);
+  corruptOnRestore = true;
+  await expect(
+    adapter.applyManagedText(
+      "document-1",
+      "new",
+      true,
+      'FormulaText(Simplify("new"))',
+    ),
+  ).rejects.toThrow("Apply rollback failed.");
+  expect(adapter.getManagedTexts()[0]?.source).toBe("old");
 });

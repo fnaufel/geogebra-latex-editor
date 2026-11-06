@@ -130,7 +130,11 @@ export function mountAuthoringEditor(
   simplifyInput: HTMLInputElement,
   copyButton: HTMLButtonElement,
   adapter: GeoGebraAdapter,
-  onState: (target: ManagedText | null, hasDraft: boolean) => void,
+  onState: (
+    target: ManagedText | null,
+    hasDraft: boolean,
+    canApply: boolean,
+  ) => void,
 ): {
   refreshSymbols: () => void;
   create: () => Promise<ManagedText>;
@@ -177,7 +181,7 @@ export function mountAuthoringEditor(
       ),
     );
     if (view.hasFocus) startCompletion(view);
-    onState(workspace.target, workspace.hasDraft);
+    onState(workspace.target, workspace.hasDraft, result.expression !== null);
   };
   const workspace = new AuthoringWorkspace(render, adapter);
   const view = new EditorView({
@@ -195,6 +199,7 @@ export function mountAuthoringEditor(
           if (!update.docChanged || replacing) return;
           workspace.setSource(update.state.doc.toString());
           workspace.setSymbols(getSymbols());
+          onState(workspace.target, workspace.hasDraft, false);
         }),
       ],
     }),
@@ -202,7 +207,7 @@ export function mountAuthoringEditor(
   });
   simplifyInput.addEventListener("change", () => {
     workspace.setSimplify(simplifyInput.checked);
-    onState(workspace.target, workspace.hasDraft);
+    onState(workspace.target, workspace.hasDraft, false);
   });
   copyButton.addEventListener("click", async () => {
     const definition = workspace.result.expression;
@@ -220,11 +225,18 @@ export function mountAuthoringEditor(
     });
     replacing = false;
     simplifyInput.checked = workspace.currentSimplify;
-    onState(workspace.target, workspace.hasDraft);
+    onState(
+      workspace.target,
+      workspace.hasDraft,
+      workspace.result.expression !== null,
+    );
     view.focus();
   }
   return {
-    refreshSymbols: () => workspace.setSymbols(getSymbols()),
+    refreshSymbols: () => {
+      workspace.setSymbols(getSymbols());
+      onState(workspace.target, workspace.hasDraft, false);
+    },
     create: async () => {
       const target = await workspace.create();
       showTarget();
@@ -232,7 +244,11 @@ export function mountAuthoringEditor(
     },
     apply: async () => {
       const target = await workspace.apply();
-      onState(workspace.target, workspace.hasDraft);
+      onState(
+        workspace.target,
+        workspace.hasDraft,
+        workspace.result.expression !== null,
+      );
       return target;
     },
     open: async (base64) => {

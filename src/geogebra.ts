@@ -1,4 +1,4 @@
-import type { SymbolInfo } from "./compiler";
+import { compileSource, type SymbolInfo } from "./compiler";
 import {
   decodeMetadata,
   emptyMetadata,
@@ -358,20 +358,43 @@ export class GeoGebraAdapter {
     if (!document || api.getObjectType?.(document.targetLabel) !== "text")
       throw new Error("Editing Target no longer exists.");
     const snapshot = api.getXML?.();
+    if (!snapshot || !api.setXML || !metadata.label)
+      throw new Error("GeoGebra cannot snapshot the Applied Source state.");
     const presentation = api.getXML?.(document.targetLabel);
+    const presentationElement = presentation?.includes("<element")
+      ? presentation.slice(presentation.indexOf("<element"))
+      : undefined;
+    const presentationMatches = () => {
+      const current = api.getXML?.(document.targetLabel);
+      return (
+        !!presentationElement &&
+        !!current &&
+        current.slice(current.indexOf("<element")) === presentationElement
+      );
+    };
+    if (!presentationMatches())
+      throw new Error(
+        "GeoGebra cannot snapshot the Editing Target presentation.",
+      );
+    const previousCommand = api.getCommandString?.(document.targetLabel, false);
+    const previousMetadata = String(api.getValueString?.(metadata.label) ?? "");
+    const previousExpression = compileSource(document.source, {
+      simplify: document.simplify,
+      symbols: this.getSymbols(),
+    }).expression;
     try {
+      // Observe GeoGebra's normalized command before writing its fingerprint.
+      // Restore the snapshot so the final target/metadata write is one operation.
       api.evalCommand?.(`${document.targetLabel}=${expression}`);
       if (api.getObjectType?.(document.targetLabel) !== "text")
         throw new Error("GeoGebra did not retain the Editing Target.");
-      if (!api.getCommandString?.(document.targetLabel, false))
-        throw new Error("GeoGebra did not retain the Compiled Definition.");
+      const stagedCommand = api.getCommandString?.(document.targetLabel, false);
       if (
-        presentation &&
-        api
-          .getXML?.(document.targetLabel)
-          ?.slice(api.getXML(document.targetLabel).indexOf("<element")) !==
-          presentation.slice(presentation.indexOf("<element"))
+        !stagedCommand ||
+        (stagedCommand === previousCommand && expression !== previousExpression)
       )
+        throw new Error("GeoGebra rejected the Compiled Definition.");
+      if (!presentationMatches())
         throw new Error("GeoGebra changed the Editing Target presentation.");
       const updated: ManagedDocument = {
         targetLabel: document.targetLabel,
@@ -380,11 +403,43 @@ export class GeoGebraAdapter {
         compiledFingerprint: await this.fingerprint(document.targetLabel),
       };
       metadata.envelope.documents[id] = updated;
-      this.writeMetadata(this.metadataLabel(metadata.label), metadata.envelope);
+      const encoded = encodeMetadata(metadata.envelope);
+      api.setXML(snapshot);
+      if (
+        api.getCommandString?.(document.targetLabel, false) !==
+          previousCommand ||
+        String(api.getValueString?.(metadata.label) ?? "") !==
+          previousMetadata ||
+        !presentationMatches()
+      )
+        throw new Error("GeoGebra did not restore the pre-Apply state.");
+      api.evalCommand?.(
+        `${document.targetLabel}=${expression}\n${metadata.label}="${encoded}"`,
+      );
+      if (
+        api.getObjectType?.(document.targetLabel) !== "text" ||
+        api.getCommandString?.(document.targetLabel, false) !== stagedCommand
+      )
+        throw new Error("GeoGebra did not retain the Compiled Definition.");
+      if (String(api.getValueString?.(metadata.label) ?? "") !== encoded)
+        throw new Error("Metadata verification failed.");
+      api.setVisible?.(metadata.label, false);
+      api.setAuxiliary?.(metadata.label, true);
+      api.setFixed?.(metadata.label, true, false);
+      if (!presentationMatches())
+        throw new Error("GeoGebra changed the Editing Target presentation.");
       api.setUndoPoint?.();
       return { id, ...updated };
     } catch (error) {
-      if (snapshot) api.setXML?.(snapshot);
+      api.setXML(snapshot);
+      if (
+        api.getCommandString?.(document.targetLabel, false) !==
+          previousCommand ||
+        String(api.getValueString?.(metadata.label) ?? "") !==
+          previousMetadata ||
+        !presentationMatches()
+      )
+        throw new Error("Apply rollback failed.", { cause: error });
       throw error;
     }
   }
