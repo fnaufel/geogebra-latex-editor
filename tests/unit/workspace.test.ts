@@ -809,3 +809,38 @@ it("refreshes an open Orphaned Source after a referenced object is renamed", asy
   expect(workspace.currentSource).toBe("@b@");
   expect(workspace.hasDraft).toBe(false);
 });
+
+it("removes a retained orphan after undo restores it while another target is open", async () => {
+  vi.useFakeTimers();
+  const first: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "first source",
+    simplify: true,
+    compiledFingerprint: "sha256:first",
+  };
+  const second: ManagedText = {
+    id: "two",
+    targetLabel: "text2",
+    source: "second source",
+    simplify: true,
+    compiledFingerprint: "sha256:second",
+  };
+  const texts = [first, second];
+  const { workspace, emit } = fakeWorkspace(texts);
+  await workspace.create();
+  texts.shift();
+  emit({ kind: "object", change: "remove", label: "text1" });
+  await vi.runAllTimersAsync();
+  emit({
+    kind: "selection",
+    selected: [{ label: "text2", type: "text", defined: true }],
+  });
+  workspace.editSelectedText();
+  expect(workspace.availableOrphans).toMatchObject([{ id: "one" }]);
+  texts.unshift(first);
+  emit({ kind: "undo" });
+  await vi.runAllTimersAsync();
+  expect(workspace.target?.id).toBe("two");
+  expect(workspace.availableOrphans).toEqual([]);
+});

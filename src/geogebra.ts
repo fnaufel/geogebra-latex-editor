@@ -729,20 +729,6 @@ export class GeoGebraAdapter {
     }
     for (const ids of exactLabels.values())
       if (ids.length > 1) for (const id of ids) this.ambiguousExactIds.add(id);
-    for (const [id, document] of documents) {
-      if (
-        this.deletedManagedIds.has(id) ||
-        this.ambiguousExactIds.has(id) ||
-        api.getObjectType?.(document.targetLabel) !== "text" ||
-        !/^sha256:[0-9a-f]{64}$/.test(document.compiledFingerprint)
-      )
-        continue;
-      if (
-        (await this.fingerprint(document.targetLabel)) !==
-        document.compiledFingerprint
-      )
-        this.ambiguousExactIds.add(id);
-    }
     const reserved = new Set(
       documents
         .filter(

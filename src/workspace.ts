@@ -450,6 +450,17 @@ export class AuthoringWorkspace {
     await this.adapter?.reconcileMetadata?.(false);
     const current = this.editingTarget;
     const managed = this.adapter?.getManagedTexts() ?? [];
+    for (const [id, orphan] of this.retainedOrphans)
+      if (
+        managed.some(
+          (text) =>
+            text.id === id &&
+            text.source === orphan.source &&
+            text.simplify === orphan.simplify &&
+            text.compiledFingerprint === orphan.compiledFingerprint,
+        )
+      )
+        this.retainedOrphans.delete(id);
     if (this.historyAction && this.historySymbolsBefore) {
       const before = new Set(
         this.historySymbolsBefore.map(({ label }) => label),
