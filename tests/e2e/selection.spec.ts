@@ -44,9 +44,9 @@ test("pins a live text selection and inserts a different object once", async ({
     ).ggbApplet.evalCommand("SelectObjects(u)");
   });
   await expect(page.locator("#selection-state")).toContainText(
-    "Unmanaged Text Object",
+    "Selected text: u",
   );
-  await expect(selected).toBeDisabled();
+  await expect(selected).toBeEnabled();
   await page.evaluate((textLabel) => {
     (
       window as unknown as {

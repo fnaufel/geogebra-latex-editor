@@ -25,6 +25,8 @@ import type { GeoGebraAdapter, ManagedText } from "./geogebra";
 
 export interface AuthoringUiState {
   target: ManagedText | null;
+  unmanaged: { label: string; renderedLatex: string } | null;
+  retainedDraftSource: string | null;
   hasDraft: boolean;
   diverged: boolean;
   canApply: boolean;
@@ -154,6 +156,7 @@ export function mountAuthoringEditor(
   hasDraft: () => boolean;
   hasAnyDraft: () => boolean;
   editSelectedText: () => boolean;
+  adopt: () => Promise<ManagedText>;
   discardDraft: () => void;
   reportActionError: (error: unknown) => Promise<void>;
   clearActionError: () => void;
@@ -168,6 +171,8 @@ export function mountAuthoringEditor(
   const emitState = (canApply = workspace.result.expression !== null) =>
     onState({
       target: workspace.target,
+      unmanaged: workspace.unmanagedTarget,
+      retainedDraftSource: workspace.retainedDraftSource,
       hasDraft: workspace.hasDraft,
       diverged: workspace.diverged,
       canApply,
@@ -179,6 +184,10 @@ export function mountAuthoringEditor(
       recoveryAvailable: workspace.recoveryAvailable,
     });
   const render = (result: CompileResult) => {
+    if ((workspace.target?.id ?? null) !== shownId) {
+      showTarget();
+      return;
+    }
     if (
       workspace.target?.id === shownId &&
       view.state.doc.toString() !== workspace.currentSource
@@ -293,7 +302,7 @@ export function mountAuthoringEditor(
     replacing = false;
     simplifyInput.checked = workspace.currentSimplify;
     render(workspace.result);
-    view.focus();
+    if (workspace.target) view.focus();
   }
   return {
     refreshSymbols: () => {
@@ -324,6 +333,11 @@ export function mountAuthoringEditor(
       const pinned = workspace.editSelectedText();
       if (pinned) showTarget();
       return pinned;
+    },
+    adopt: async () => {
+      const target = await workspace.adopt(true);
+      showTarget();
+      return target;
     },
     discardDraft: () => workspace.discardDraft(),
     reportActionError: (error) =>

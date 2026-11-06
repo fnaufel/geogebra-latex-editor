@@ -12,6 +12,8 @@ function fakeWorkspace(texts: ManagedText[]) {
   let listener: (event: ConstructionEvent) => void = () => {};
   const adapter: WorkspaceAdapter = {
     getSymbols: () => [],
+    getUnmanagedTextSnapshot: () => "unmanaged",
+    adoptUnmanagedText: async () => texts[0]!,
     createManagedText: async () => texts[0]!,
     applyManagedText: async () => texts[0]!,
     importBase64: async () => {},
@@ -67,6 +69,8 @@ it("keeps source and simplification as a draft until explicit Apply", async () =
   );
   const adapter: WorkspaceAdapter = {
     getSymbols: () => [],
+    getUnmanagedTextSnapshot: () => "unmanaged",
+    adoptUnmanagedText: async () => applied,
     createManagedText: async () => applied,
     applyManagedText,
     importBase64: async () => {},
@@ -128,8 +132,8 @@ it("pins an explicitly selected text and retains each target's draft across sele
     kind: "selection",
     selected: [{ label: "unmanaged", type: "text", defined: true }],
   });
-  expect(workspace.canEditSelection).toBe(false);
-  expect(workspace.selectionMessage).toMatch(/Unmanaged Text Object/);
+  expect(workspace.canEditSelection).toBe(true);
+  expect(workspace.selectionMessage).toMatch(/Choose Edit selected text/);
   emit({
     kind: "selection",
     selected: [
@@ -160,6 +164,78 @@ it("pins an explicitly selected text and retains each target's draft across sele
   });
   workspace.editSelectedText();
   expect(workspace.currentSource).toBe("draft B");
+});
+
+it("opens unmanaged rendered LaTeX read-only, then adopts a literal snapshot across undo and redo", async () => {
+  vi.useFakeTimers();
+  const texts: ManagedText[] = [];
+  let listener: (event: ConstructionEvent) => void = () => {};
+  const adoptUnmanagedText = vi.fn(async (label: string, expected: string) => {
+    expect(label).toBe("u");
+    expect(expected).toBe("x@a@\\alpha");
+    const adopted = {
+      id: "adopted",
+      targetLabel: label,
+      source: "x@@a@@\\alpha",
+      simplify: false,
+      compiledFingerprint: "sha256:adopted",
+    };
+    texts.push(adopted);
+    return adopted;
+  });
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => [{ label: "u", type: "text", defined: true }],
+    createManagedText: async () => texts[0]!,
+    applyManagedText: async () => texts[0]!,
+    adoptUnmanagedText,
+    getUnmanagedTextSnapshot: () => "x@a@\\alpha",
+    importBase64: async () => {},
+    getManagedTexts: () => texts,
+    exportBase64: async () => "file",
+    onEvent: (callback) => {
+      listener = callback;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  listener({
+    kind: "selection",
+    selected: [{ label: "u", type: "text", defined: true }],
+  });
+  expect(workspace.editSelectedText()).toBe(true);
+  expect(workspace.unmanagedTarget).toEqual({
+    label: "u",
+    renderedLatex: "x@a@\\alpha",
+  });
+  expect(workspace.target).toBeNull();
+  expect(workspace.hasDraft).toBe(false);
+  await expect(workspace.adopt(false)).rejects.toThrow(/Confirm Adoption/);
+  expect(adoptUnmanagedText).not.toHaveBeenCalled();
+  await workspace.adopt(true);
+  expect(adoptUnmanagedText).toHaveBeenCalledOnce();
+  expect(workspace.target?.source).toBe("x@@a@@\\alpha");
+  expect(workspace.currentSimplify).toBe(false);
+  workspace.setSource("my unapplied revision");
+  texts.pop();
+  listener({ kind: "undo" });
+  await vi.runAllTimersAsync();
+  expect(workspace.unmanagedTarget?.label).toBe("u");
+  expect(workspace.target).toBeNull();
+  expect(workspace.retainedDraftSource).toBe("my unapplied revision");
+  expect(workspace.hasAnyDraft).toBe(true);
+  expect(workspace.editSelectedText()).toBe(true);
+  expect(workspace.retainedDraftSource).toBe("my unapplied revision");
+  texts.push({
+    id: "adopted",
+    targetLabel: "u",
+    source: "x@@a@@\\alpha",
+    simplify: false,
+    compiledFingerprint: "sha256:adopted",
+  });
+  listener({ kind: "redo" });
+  await vi.runAllTimersAsync();
+  expect(workspace.target?.id).toBe("adopted");
+  expect(workspace.currentSource).toBe("my unapplied revision");
 });
 
 it("inserts one selected object at the saved cursor, rejects multiple selection, and cancels cleanly", async () => {
@@ -238,6 +314,8 @@ it("resynchronizes Applied Source after history without replacing a Diverged Dra
   let emit: (event: ConstructionEvent) => void = () => {};
   const adapter: WorkspaceAdapter = {
     getSymbols: () => [],
+    getUnmanagedTextSnapshot: () => "unmanaged",
+    adoptUnmanagedText: async () => applied,
     createManagedText: async () => applied,
     applyManagedText: async () => applied,
     importBase64: async () => {},
@@ -286,6 +364,8 @@ it("refreshes an unpinned target after history while preserving its real drafts"
   let emit: (event: ConstructionEvent) => void = () => {};
   const adapter: WorkspaceAdapter = {
     getSymbols: () => [],
+    getUnmanagedTextSnapshot: () => "unmanaged",
+    adoptUnmanagedText: async () => first,
     createManagedText: async () => first,
     applyManagedText: async () => first,
     importBase64: async () => {},
@@ -348,6 +428,8 @@ it("retains Draft Source when compilation or adapter Apply fails", async () => {
   };
   const adapter: WorkspaceAdapter = {
     getSymbols: () => [],
+    getUnmanagedTextSnapshot: () => "unmanaged",
+    adoptUnmanagedText: async () => applied,
     createManagedText: async () => applied,
     applyManagedText: async () => {
       throw new Error("Metadata verification failed.");

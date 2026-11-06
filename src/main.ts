@@ -47,6 +47,7 @@ root.innerHTML = `
         <p id="selection-state" role="status" aria-live="polite">Select one text object in GeoGebra, then choose Edit selected text.</p>
         <div class="editor-actions">
           <button id="edit-selected" type="button" disabled>Edit selected text</button>
+          <button id="adopt" type="button" hidden>Adopt text</button>
           <button id="insert-object" type="button" disabled>Insert Object</button>
           <button id="cancel-insertion" type="button" hidden>Cancel insertion</button>
           <button id="apply" type="button" disabled>Apply</button>
@@ -59,7 +60,9 @@ root.innerHTML = `
         <p id="interaction-state" role="status" aria-live="polite"></p>
       </div>
       <div id="editor" class="editor-host" aria-label="Authoring Source editor"></div>
-      <div class="editor-feedback">
+      <pre id="unmanaged-source" role="region" aria-label="Rendered LaTeX snapshot" hidden></pre>
+      <pre id="retained-draft" role="region" aria-label="Draft Source retained after undo" hidden></pre>
+      <div id="editor-feedback" class="editor-feedback">
         <label class="simplify-control"><input id="simplify" type="checkbox" checked>Clean signs and 1x coefficients</label>
         <p class="simplify-help">GeoGebra rewrites the complete text without understanding LaTeX. For example, \\text{C++} can become \\text{C + }, and \\text{--} can become \\text{ + }.</p>
         <h3>Diagnostics</h3>
@@ -93,6 +96,10 @@ const loadingMark = required<HTMLElement>("#loading-mark");
 const retry = required<HTMLButtonElement>("#retry");
 const splitter = required<HTMLElement>("#splitter");
 const editorHost = required<HTMLElement>("#editor");
+const unmanagedSource = required<HTMLElement>("#unmanaged-source");
+const retainedDraft = required<HTMLElement>("#retained-draft");
+const editorFeedback = required<HTMLElement>("#editor-feedback");
+const simplifyInput = required<HTMLInputElement>("#simplify");
 const newManagedText = required<HTMLButtonElement>("#new-managed-text");
 const openFile = required<HTMLButtonElement>("#open-file");
 const fileInput = required<HTMLInputElement>("#file-input");
@@ -103,6 +110,7 @@ const targetState = required<HTMLElement>("#target-state");
 const selectionState = required<HTMLElement>("#selection-state");
 const interactionState = required<HTMLElement>("#interaction-state");
 const editSelected = required<HTMLButtonElement>("#edit-selected");
+const adoptButton = required<HTMLButtonElement>("#adopt");
 const insertObject = required<HTMLButtonElement>("#insert-object");
 const cancelInsertion = required<HTMLButtonElement>("#cancel-insertion");
 const applyButton = required<HTMLButtonElement>("#apply");
@@ -150,11 +158,13 @@ const authoring = mountAuthoringEditor(
   editorHost,
   required<HTMLElement>("#diagnostics"),
   required<HTMLElement>("#compiled-definition"),
-  required<HTMLInputElement>("#simplify"),
+  simplifyInput,
   required<HTMLButtonElement>("#copy-definition"),
   adapter,
   ({
     target,
+    unmanaged,
+    retainedDraftSource,
     hasDraft,
     diverged,
     canApply,
@@ -167,19 +177,33 @@ const authoring = mountAuthoringEditor(
   }) => {
     targetLabel.textContent = target
       ? `Editing Target: ${target.targetLabel}`
-      : "No Editing Target";
+      : unmanaged
+        ? `Editing Target: ${unmanaged.label}`
+        : "No Editing Target";
     targetState.textContent =
       actionError ??
-      (target
-        ? hasDraft
-          ? diverged
-            ? "Diverged Draft: Applied Source changed in GeoGebra. Reapply or discard this draft."
-            : "Draft Source has unapplied changes."
-          : "Applied Source is current."
-        : recoveryAvailable
-          ? "A failed Apply snapshot and Draft Source are available to restore."
-          : "No text is open for editing.");
+      (unmanaged
+        ? retainedDraftSource !== null
+          ? "Unmanaged Text Object. Draft Source from undone Adoption is retained below. Redo or adopt again to edit it."
+          : "Unmanaged Text Object. This is a read-only snapshot of its current rendered LaTeX. Adopt to create Authoring Source."
+        : target
+          ? hasDraft
+            ? diverged
+              ? "Diverged Draft: Applied Source changed in GeoGebra. Reapply or discard this draft."
+              : "Draft Source has unapplied changes."
+            : "Applied Source is current."
+          : recoveryAvailable
+            ? "A failed Apply snapshot and Draft Source are available to restore."
+            : "No text is open for editing.");
     applyButton.disabled = !target || !hasDraft || !canApply;
+    adoptButton.hidden = !unmanaged;
+    unmanagedSource.hidden = !unmanaged;
+    unmanagedSource.textContent = unmanaged?.renderedLatex ?? "";
+    retainedDraft.hidden = retainedDraftSource === null;
+    retainedDraft.textContent = retainedDraftSource ?? "";
+    editorHost.hidden = !!unmanaged;
+    editorFeedback.hidden = !!unmanaged;
+    simplifyInput.disabled = !!unmanaged;
     applyButton.hidden = diverged;
     reapplyButton.hidden = !diverged;
     reapplyButton.disabled = !canApply;
@@ -207,7 +231,20 @@ newManagedText.addEventListener("click", () => {
   authoring.clearActionError();
   void authoring.create().catch(reportActionError);
 });
-editSelected.addEventListener("click", () => authoring.editSelectedText());
+editSelected.addEventListener("click", () => {
+  if (authoring.editSelectedText() && !adoptButton.hidden) adoptButton.focus();
+});
+adoptButton.addEventListener("click", () => {
+  if (
+    !window.confirm(
+      "Adopt this Unmanaged Text Object? Authoring Source will be only a literal snapshot of the current rendered LaTeX. Original dynamic dependencies cannot be reconstructed.",
+    )
+  ) {
+    adoptButton.focus();
+    return;
+  }
+  void authoring.adopt().catch(reportActionError);
+});
 insertObject.addEventListener("click", () => authoring.startInsertion());
 cancelInsertion.addEventListener("click", () => authoring.cancelInsertion());
 window.addEventListener("keydown", (event) => {

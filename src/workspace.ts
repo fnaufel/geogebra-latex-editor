@@ -13,6 +13,11 @@ import {
 
 export interface WorkspaceAdapter {
   getSymbols(): SymbolInfo[];
+  getUnmanagedTextSnapshot(label: string): string;
+  adoptUnmanagedText(
+    label: string,
+    expectedRenderedLatex: string,
+  ): Promise<ManagedText>;
   createManagedText(): Promise<ManagedText>;
   applyManagedText(
     id: string,
@@ -35,6 +40,11 @@ export class AuthoringWorkspace {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private compiled = compileSource("", { simplify: true, symbols: [] });
   private editingTarget: ManagedText | null = null;
+  private unmanaged: {
+    label: string;
+    renderedLatex: string;
+    formerManagedId?: string;
+  } | null = null;
   private selected: readonly SymbolInfo[] = [];
   private readonly drafts = new Map<
     string,
@@ -44,6 +54,7 @@ export class AuthoringWorkspace {
     string,
     Pick<ManagedText, "source" | "simplify" | "compiledFingerprint">
   >();
+  private readonly undoneAdoptions = new Map<string, string>();
   private resyncTimer: ReturnType<typeof setTimeout> | undefined;
   private insertionRange: { from: number; to: number } | null = null;
   private insertionQueued = false;
@@ -79,8 +90,6 @@ export class AuthoringWorkspace {
       return "Select exactly one text object to edit.";
     if (this.selected[0]?.type !== "text")
       return "The selected object is not a text object.";
-    if (!this.canEditSelection)
-      return `${this.selected[0]!.label} is an Unmanaged Text Object. Authoring Source is unavailable until Adoption.`;
     return `Selected text: ${this.selected[0]!.label}. Choose Edit selected text to pin it.`;
   }
 
@@ -89,8 +98,6 @@ export class AuthoringWorkspace {
       this.selected.length === 1 &&
       this.selected[0]?.type === "text" &&
       !!this.adapter
-        ?.getManagedTexts()
-        .some((text) => text.targetLabel === this.selected[0]?.label)
     );
   }
 
@@ -156,6 +163,7 @@ export class AuthoringWorkspace {
       throw new Error("The recovered Editing Target is unavailable.");
     this.drafts.clear();
     this.draftBaselines.clear();
+    this.undoneAdoptions.clear();
     this.editingTarget = null;
     this.loadTarget(target);
     this.setSource(recovery.source);
@@ -179,13 +187,46 @@ export class AuthoringWorkspace {
       .getManagedTexts()
       .find((text) => text.targetLabel === label);
     if (!target) {
-      this.message = `${label} is an Unmanaged Text Object. Authoring Source is unavailable until Adoption.`;
+      const renderedLatex = this.adapter.getUnmanagedTextSnapshot(label);
+      this.loadTarget(null);
+      this.unmanaged = {
+        label,
+        renderedLatex,
+        formerManagedId: this.undoneAdoptions.get(label),
+      };
+      this.message = `${label} is an Unmanaged Text Object. Adoption requires confirmation.`;
       this.notify(this.compiled);
-      return false;
+      return true;
     }
+    this.undoneAdoptions.delete(label);
     this.message = `Editing Target pinned to ${label}.`;
     this.loadTarget(target);
     return true;
+  }
+
+  async adopt(confirmed: boolean): Promise<ManagedText> {
+    if (!confirmed || !this.adapter || !this.unmanaged)
+      throw new Error("Confirm Adoption of an Unmanaged Text Object first.");
+    const { label, renderedLatex, formerManagedId } = this.unmanaged;
+    const retainedDraft = formerManagedId
+      ? this.drafts.get(formerManagedId)
+      : undefined;
+    const target = await this.adapter.adoptUnmanagedText(label, renderedLatex);
+    this.clearActionError();
+    if (formerManagedId && retainedDraft) {
+      this.drafts.delete(formerManagedId);
+      this.draftBaselines.delete(formerManagedId);
+    }
+    this.undoneAdoptions.delete(label);
+    this.loadTarget(target);
+    if (retainedDraft) {
+      this.setSource(retainedDraft.source);
+      this.setSimplify(retainedDraft.simplify);
+      this.validateNow();
+    }
+    this.message = `Adopted ${label} as a Managed Text Object.`;
+    this.notify(this.compiled);
+    return target;
   }
 
   startInsertion(from: number, to: number): void {
@@ -261,9 +302,8 @@ export class AuthoringWorkspace {
 
   private resynchronize(): void {
     const current = this.editingTarget;
-    const applied = this.adapter
-      ?.getManagedTexts()
-      .find((text) => text.id === current?.id);
+    const managed = this.adapter?.getManagedTexts() ?? [];
+    const applied = managed.find((text) => text.id === current?.id);
     if (current && applied) {
       const dirty = this.hasDraft;
       this.editingTarget = applied;
@@ -273,6 +313,47 @@ export class AuthoringWorkspace {
         this.drafts.delete(applied.id);
         this.draftBaselines.delete(applied.id);
       }
+    } else if (
+      current &&
+      this.adapter
+        ?.getSymbols()
+        .some(
+          (symbol) =>
+            symbol.label === current.targetLabel && symbol.type === "text",
+        )
+    ) {
+      this.loadTarget(null);
+      if (this.drafts.has(current.id))
+        this.undoneAdoptions.set(current.targetLabel, current.id);
+      this.unmanaged = {
+        label: current.targetLabel,
+        renderedLatex: this.adapter.getUnmanagedTextSnapshot(
+          current.targetLabel,
+        ),
+        formerManagedId: current.id,
+      };
+    } else if (this.unmanaged) {
+      const restored = managed.find(
+        (text) => text.targetLabel === this.unmanaged?.label,
+      );
+      if (restored) {
+        this.undoneAdoptions.delete(restored.targetLabel);
+        this.loadTarget(restored);
+      } else if (
+        this.adapter
+          ?.getSymbols()
+          .some(
+            (symbol) =>
+              symbol.label === this.unmanaged?.label && symbol.type === "text",
+          )
+      )
+        this.unmanaged = {
+          label: this.unmanaged.label,
+          renderedLatex: this.adapter.getUnmanagedTextSnapshot(
+            this.unmanaged.label,
+          ),
+          formerManagedId: this.unmanaged.formerManagedId,
+        };
     }
     this.symbols = this.adapter?.getSymbols() ?? this.symbols;
     this.validateNow();
@@ -280,6 +361,15 @@ export class AuthoringWorkspace {
 
   get target(): ManagedText | null {
     return this.editingTarget;
+  }
+
+  get unmanagedTarget(): { label: string; renderedLatex: string } | null {
+    return this.unmanaged;
+  }
+
+  get retainedDraftSource(): string | null {
+    const formerId = this.unmanaged?.formerManagedId;
+    return formerId ? (this.drafts.get(formerId)?.source ?? null) : null;
   }
 
   get currentSource(): string {
@@ -326,8 +416,9 @@ export class AuthoringWorkspace {
     return [...this.drafts].some(([id, draft]) => {
       const text = applied.get(id);
       return (
-        !!text &&
-        (draft.source !== text.source || draft.simplify !== text.simplify)
+        !text ||
+        draft.source !== text.source ||
+        draft.simplify !== text.simplify
       );
     });
   }
@@ -347,6 +438,7 @@ export class AuthoringWorkspace {
       }
     }
     this.editingTarget = target;
+    this.unmanaged = null;
     const draft = target && this.drafts.get(target.id);
     this.source = draft?.source ?? target?.source ?? "";
     this.simplify = draft?.simplify ?? target?.simplify ?? true;
@@ -391,6 +483,7 @@ export class AuthoringWorkspace {
     this.clearActionError();
     this.drafts.clear();
     this.draftBaselines.clear();
+    this.undoneAdoptions.clear();
     this.editingTarget = null;
     this.insertionRange = null;
     const target = this.adapter.getManagedTexts()[0] ?? null;
@@ -421,6 +514,7 @@ export class AuthoringWorkspace {
   }
 
   setSource(source: string): void {
+    if (this.unmanaged) return;
     this.rememberDraftBaseline();
     this.source = source;
     if (this.editingTarget)
@@ -432,6 +526,7 @@ export class AuthoringWorkspace {
   }
 
   setSimplify(simplify: boolean): void {
+    if (this.unmanaged) return;
     this.rememberDraftBaseline();
     this.simplify = simplify;
     if (this.editingTarget)

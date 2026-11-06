@@ -416,6 +416,39 @@ export class GeoGebraAdapter {
     return { label: null, envelope: emptyMetadata() };
   }
 
+  private hasNewerMetadata(): boolean {
+    const api = this.readyApi();
+    for (const label of api.getAllObjectNames?.() ?? []) {
+      if (
+        !label.startsWith(METADATA_PREFIX) ||
+        api.getObjectType?.(label) !== "text"
+      )
+        continue;
+      const value = String(api.getValueString?.(label) ?? "");
+      if (!/^[A-Za-z0-9_-]+={0,2}$/.test(value)) continue;
+      try {
+        const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
+        const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+        const parsed: unknown = JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+        );
+        if (!parsed || typeof parsed !== "object") continue;
+        const record = parsed as Record<string, unknown>;
+        if (
+          record.application === "geogebra-latex-editor" &&
+          ((typeof record.schemaVersion === "number" &&
+            record.schemaVersion > 1) ||
+            (typeof record.languageVersion === "number" &&
+              record.languageVersion > 1))
+        )
+          return true;
+      } catch {
+        // Other prefix collisions are not owned metadata.
+      }
+    }
+    return false;
+  }
+
   getManagedTexts(): ManagedText[] {
     const api = this.readyApi();
     return Object.entries(this.metadata().envelope.documents)
@@ -423,6 +456,103 @@ export class GeoGebraAdapter {
         ([, document]) => api.getObjectType?.(document.targetLabel) === "text",
       )
       .map(([id, document]) => ({ id, ...document }));
+  }
+
+  getUnmanagedTextSnapshot(label: string): string {
+    const api = this.readyApi();
+    if (api.getObjectType?.(label) !== "text" || !api.getValueString)
+      throw new Error("The Unmanaged Text Object is no longer available.");
+    return String(api.getValueString(label));
+  }
+
+  async adoptUnmanagedText(
+    label: string,
+    expectedRenderedLatex: string,
+  ): Promise<ManagedText> {
+    const api = this.readyApi();
+    if (this.hasNewerMetadata())
+      throw new Error(
+        "Cannot adopt while this construction contains newer Authoring Source metadata.",
+      );
+    const metadata = this.metadata();
+    if (
+      api.getObjectType?.(label) !== "text" ||
+      this.getManagedTexts().some((text) => text.targetLabel === label)
+    )
+      throw new Error("The object is no longer an Unmanaged Text Object.");
+    if (this.getUnmanagedTextSnapshot(label) !== expectedRenderedLatex)
+      throw new Error(
+        "The rendered LaTeX changed. Reopen the text and confirm its current snapshot.",
+      );
+    const snapshot = api.getXML?.();
+    if (
+      !snapshot ||
+      !api.setXML ||
+      !api.getCommandString ||
+      !api.getCaption ||
+      !api.evalCommand ||
+      !api.setUndoPoint
+    )
+      throw new Error(
+        "GeoGebra cannot snapshot Adoption for rollback and undo.",
+      );
+    const presentationMatches = snapshotPresentation(
+      api,
+      label,
+      "Unmanaged Text Object",
+    );
+    const command = api.getCommandString(label, false);
+    const caption = api.getCaption(label, false);
+    const selectedBefore = [...this.selectedLabels];
+    const selectionMatches = () =>
+      selectedBefore.length === this.selectedLabels.size &&
+      selectedBefore.every((selected) => this.selectedLabels.has(selected));
+    const restoreSelection = () => {
+      if (!selectionMatches())
+        api.evalCommand!(`SelectObjects(${selectedBefore.join(",")})`);
+      if (!selectionMatches())
+        throw new Error("Adoption changed the GeoGebra selection.");
+    };
+    const id = crypto.randomUUID();
+    const document: ManagedDocument = {
+      targetLabel: label,
+      source: expectedRenderedLatex.replace(/@/g, "@@"),
+      simplify: false,
+      compiledFingerprint: await this.fingerprint(label),
+    };
+    const metadataLabel = this.metadataLabel(metadata.label);
+    metadata.envelope.documents[id] = document;
+    try {
+      this.writeMetadata(metadataLabel, metadata.envelope);
+      if (
+        api.getObjectType?.(label) !== "text" ||
+        this.getUnmanagedTextSnapshot(label) !== expectedRenderedLatex ||
+        api.getCommandString(label, false) !== command ||
+        api.getCaption(label, false) !== caption ||
+        !presentationMatches()
+      )
+        throw new Error(
+          "Adoption changed the object's definition or presentation.",
+        );
+      const observed = this.metadata();
+      if (
+        observed.label !== metadataLabel ||
+        encodeMetadata(observed.envelope) !== encodeMetadata(metadata.envelope)
+      )
+        throw new Error("Adoption metadata could not be verified.");
+      restoreSelection();
+      api.setUndoPoint();
+      return { id, ...document };
+    } catch (error) {
+      api.setXML(snapshot);
+      restoreSelection();
+      if (api.getXML?.() !== snapshot)
+        throw new Error(
+          "Adoption rollback failed; reload the construction before trying again.",
+          { cause: error },
+        );
+      throw error;
+    }
   }
 
   private metadataLabel(existing: string | null): string {
