@@ -724,3 +724,88 @@ it("undoes and redoes a reference rename in the retained Draft Source", async ()
   expect(workspace.diverged).toBe(false);
   expect(workspace.result.diagnostics).toEqual([]);
 });
+
+it("reopens a locally retained Orphaned Source after editing another target", async () => {
+  vi.useFakeTimers();
+  const first: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "precious source",
+    simplify: true,
+    compiledFingerprint: "sha256:first",
+  };
+  const second: ManagedText = {
+    id: "two",
+    targetLabel: "text2",
+    source: "other source",
+    simplify: true,
+    compiledFingerprint: "sha256:second",
+  };
+  const texts = [first, second];
+  const { workspace, emit } = fakeWorkspace(texts);
+  await workspace.create();
+  workspace.setSource("my retained draft");
+  texts.shift();
+  emit({ kind: "object", change: "remove", label: "text1" });
+  await vi.runAllTimersAsync();
+  expect(workspace.orphanedTarget?.id).toBe("one");
+  emit({
+    kind: "selection",
+    selected: [{ label: "text2", type: "text", defined: true }],
+  });
+  expect(workspace.editSelectedText()).toBe(true);
+  expect(workspace.target?.id).toBe("two");
+  expect(workspace.availableOrphans).toMatchObject([{ id: "one" }]);
+  workspace.openOrphaned("one");
+  expect(workspace.currentSource).toBe("my retained draft");
+  expect(workspace.orphanedTarget?.source).toBe("precious source");
+  await workspace.discardOrphaned();
+  expect(workspace.availableOrphans).toEqual([]);
+});
+
+it("refreshes an open Orphaned Source after a referenced object is renamed", async () => {
+  vi.useFakeTimers();
+  const original: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "@a@",
+    simplify: true,
+    compiledFingerprint: "sha256:original",
+  };
+  let texts = [original];
+  let orphan = { ...original, candidates: [] as string[] };
+  let symbols = [
+    { label: "a", type: "number", defined: true },
+    { label: "text1", type: "text", defined: true },
+  ];
+  let emit: (event: ConstructionEvent) => void = () => {};
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => symbols,
+    getUnmanagedTextSnapshot: () => "",
+    adoptUnmanagedText: async () => original,
+    createManagedText: async () => original,
+    applyManagedText: async () => original,
+    importBase64: async () => {},
+    getManagedTexts: () => texts,
+    getOrphanedTexts: () => (texts.length ? [] : [orphan]),
+    exportBase64: async () => "",
+    onEvent: (listener) => {
+      emit = listener;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  texts = [];
+  symbols = [symbols[0]!];
+  emit({ kind: "object", change: "remove", label: "text1" });
+  await vi.runAllTimersAsync();
+  expect(workspace.currentSource).toBe("@a@");
+  orphan = { ...orphan, source: "@b@" };
+  symbols = [{ ...symbols[0]!, label: "b" }];
+  emit({ kind: "rename", oldLabel: "a", label: "b" });
+  await vi.runAllTimersAsync();
+  expect(workspace.orphanedTarget?.source).toBe("@b@");
+  expect(workspace.currentSource).toBe("@b@");
+  expect(workspace.hasDraft).toBe(false);
+});

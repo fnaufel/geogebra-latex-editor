@@ -35,6 +35,7 @@ export interface WorkspaceAdapter {
   importBase64(base64: string): Promise<void>;
   getManagedTexts(): ManagedText[];
   getOrphanedTexts?(): OrphanedText[];
+  discardOrphanedText?(id: string): Promise<void>;
   restoreOrphanedText?(
     id: string,
     source: string,
@@ -60,6 +61,7 @@ export class AuthoringWorkspace {
     formerManagedId?: string;
   } | null = null;
   private orphaned: OrphanedText | null = null;
+  private readonly retainedOrphans = new Map<string, OrphanedText>();
   private selected: readonly SymbolInfo[] = [];
   private readonly drafts = new Map<
     string,
@@ -251,17 +253,61 @@ export class AuthoringWorkspace {
   }
 
   async restoreOrphaned(): Promise<ManagedText> {
-    if (!this.orphaned || !this.adapter?.restoreOrphanedText)
+    if (
+      !this.canRestoreOrphaned ||
+      !this.orphaned ||
+      !this.adapter?.restoreOrphanedText
+    )
       throw new Error("No Orphaned Source is available for restoration.");
     const target = await this.adapter.restoreOrphanedText(
       this.orphaned.id,
       this.source,
       this.simplify,
     );
+    this.retainedOrphans.delete(target.id);
     this.loadTarget(target);
     this.message = `Orphaned Source restored as ${target.targetLabel}.`;
     this.notify(this.compiled);
     return target;
+  }
+
+  get availableOrphans(): OrphanedText[] {
+    const orphans = new Map(
+      this.adapter?.getOrphanedTexts?.().map((text) => [text.id, text]) ?? [],
+    );
+    for (const [id, text] of this.retainedOrphans) orphans.set(id, text);
+    if (this.orphaned) orphans.set(this.orphaned.id, this.orphaned);
+    return [...orphans.values()];
+  }
+
+  openOrphaned(id: string): void {
+    const orphan = this.availableOrphans.find((text) => text.id === id);
+    if (!orphan) throw new Error("Orphaned Source is no longer available.");
+    this.loadTarget(null);
+    this.orphaned = orphan;
+    const draft = this.drafts.get(id);
+    this.source = draft?.source ?? orphan.source;
+    this.simplify = draft?.simplify ?? orphan.simplify;
+    this.message = `Orphaned Source for ${orphan.targetLabel} is open.`;
+    this.validateNow();
+  }
+
+  async discardOrphaned(): Promise<void> {
+    const orphan = this.orphaned;
+    if (!orphan) throw new Error("No Orphaned Source is open.");
+    if (this.canRestoreOrphaned && this.adapter) {
+      if (!this.adapter.discardOrphanedText)
+        throw new Error("GeoGebra cannot discard this Orphaned Source.");
+      await this.adapter.discardOrphanedText(orphan.id);
+    }
+    this.retainedOrphans.delete(orphan.id);
+    this.drafts.delete(orphan.id);
+    this.draftBaselines.delete(orphan.id);
+    this.orphaned = null;
+    this.source = "";
+    this.simplify = true;
+    this.message = `Orphaned Source for ${orphan.targetLabel} was discarded.`;
+    this.validateNow();
   }
 
   startInsertion(from: number, to: number): void {
@@ -296,7 +342,7 @@ export class AuthoringWorkspace {
         symbols,
       );
       this.drafts.set(id, { ...draft, source: rewritten.source });
-      if (this.editingTarget?.id === id) {
+      if (this.editingTarget?.id === id || this.orphaned?.id === id) {
         this.source = rewritten.source;
         this.manualRenameRanges = rewritten.ambiguous;
       }
@@ -452,6 +498,8 @@ export class AuthoringWorkspace {
       }
     }
     if (this.orphaned) {
+      const oldOrphan = this.orphaned;
+      const dirty = this.hasDraft;
       const reattached = managed.find(
         (text) =>
           text.id === this.orphaned?.id &&
@@ -459,12 +507,33 @@ export class AuthoringWorkspace {
           text.simplify === this.orphaned.simplify &&
           text.compiledFingerprint === this.orphaned.compiledFingerprint,
       );
-      if (reattached) this.loadTarget(reattached);
-      else
-        this.orphaned =
-          this.adapter
-            ?.getOrphanedTexts?.()
-            .find((text) => text.id === this.orphaned?.id) ?? this.orphaned;
+      if (reattached) {
+        this.retainedOrphans.delete(reattached.id);
+        this.loadTarget(reattached);
+      } else {
+        const updated = this.adapter
+          ?.getOrphanedTexts?.()
+          .find((text) => text.id === oldOrphan.id);
+        if (
+          updated &&
+          (this.renamePending ||
+            this.historyPending ||
+            (updated.source === oldOrphan.source &&
+              updated.simplify === oldOrphan.simplify &&
+              updated.compiledFingerprint === oldOrphan.compiledFingerprint))
+        ) {
+          this.orphaned = updated;
+          if (!dirty) {
+            this.source = updated.source;
+            this.simplify = updated.simplify;
+          }
+        } else {
+          this.retainedOrphans.set(oldOrphan.id, oldOrphan);
+          if (updated)
+            this.message =
+              "Orphaned Source metadata changed externally. Source is retained in this tab; target identity is uncertain.";
+        }
+      }
     }
     const applied = managed.find((text) => text.id === current?.id);
     const externallyReplaced =
@@ -519,12 +588,11 @@ export class AuthoringWorkspace {
           source: this.source,
           simplify: this.simplify,
         });
-      this.orphaned = this.adapter
+      const storedOrphan = this.adapter
         ?.getOrphanedTexts?.()
-        .find((text) => text.id === current.id) ?? {
-        ...current,
-        candidates: [],
-      };
+        .find((text) => text.id === current.id);
+      this.orphaned = storedOrphan ?? { ...current, candidates: [] };
+      if (!storedOrphan) this.retainedOrphans.set(current.id, this.orphaned);
       this.editingTarget = null;
       this.message =
         externallyReplaced ||
@@ -577,7 +645,13 @@ export class AuthoringWorkspace {
       !!this.orphaned &&
       !!this.adapter
         ?.getOrphanedTexts?.()
-        .some((text) => text.id === this.orphaned?.id)
+        .some(
+          (text) =>
+            text.id === this.orphaned?.id &&
+            text.source === this.orphaned.source &&
+            text.simplify === this.orphaned.simplify &&
+            text.compiledFingerprint === this.orphaned.compiledFingerprint,
+        )
     );
   }
 
@@ -655,6 +729,11 @@ export class AuthoringWorkspace {
         this.draftBaselines.delete(this.editingTarget.id);
       }
     }
+    if (this.orphaned && this.hasDraft)
+      this.drafts.set(this.orphaned.id, {
+        source: this.source,
+        simplify: this.simplify,
+      });
     this.editingTarget = target;
     this.orphaned = null;
     this.unmanaged = null;
@@ -703,6 +782,7 @@ export class AuthoringWorkspace {
     this.drafts.clear();
     this.draftBaselines.clear();
     this.undoneAdoptions.clear();
+    this.retainedOrphans.clear();
     this.editingTarget = null;
     this.orphaned = null;
     this.insertionRange = null;

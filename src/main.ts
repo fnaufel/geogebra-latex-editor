@@ -49,6 +49,7 @@ root.innerHTML = `
           <button id="edit-selected" type="button" disabled>Edit selected text</button>
           <button id="adopt" type="button" hidden>Adopt text</button>
           <button id="restore-orphaned" type="button" hidden>Restore Orphaned Source as new text</button>
+          <button id="discard-orphaned" type="button" hidden>Discard Orphaned Source</button>
           <button id="insert-object" type="button" disabled>Insert Object</button>
           <button id="cancel-insertion" type="button" hidden>Cancel insertion</button>
           <button id="apply" type="button" disabled>Apply</button>
@@ -56,6 +57,7 @@ root.innerHTML = `
           <button id="discard-draft" type="button" hidden>Discard Draft</button>
           <button id="recover-failed-apply" type="button" hidden disabled>Restore failed Apply draft</button>
         </div>
+        <div id="orphaned-sources" role="group" aria-label="Other Orphaned Sources" hidden></div>
         <p id="applied-source-label" hidden>Applied Source:</p>
         <pre id="applied-source" hidden></pre>
         <p id="interaction-state" role="status" aria-live="polite"></p>
@@ -113,6 +115,8 @@ const interactionState = required<HTMLElement>("#interaction-state");
 const editSelected = required<HTMLButtonElement>("#edit-selected");
 const adoptButton = required<HTMLButtonElement>("#adopt");
 const restoreOrphanedButton = required<HTMLButtonElement>("#restore-orphaned");
+const discardOrphanedButton = required<HTMLButtonElement>("#discard-orphaned");
+const orphanedSources = required<HTMLElement>("#orphaned-sources");
 const insertObject = required<HTMLButtonElement>("#insert-object");
 const cancelInsertion = required<HTMLButtonElement>("#cancel-insertion");
 const applyButton = required<HTMLButtonElement>("#apply");
@@ -167,6 +171,7 @@ const authoring = mountAuthoringEditor(
     target,
     unmanaged,
     orphaned,
+    availableOrphans,
     canRestoreOrphaned,
     retainedDraftSource,
     hasDraft,
@@ -191,7 +196,9 @@ const authoring = mountAuthoringEditor(
       (orphaned
         ? orphaned.candidates.length
           ? `Orphaned Source. Multiple possible targets (${orphaned.candidates.join(", ")}); choose a new target or resolve the uncertainty manually.`
-          : "Orphaned Source is retained. Edit it if needed, then restore it as a new Managed Text Object."
+          : canRestoreOrphaned
+            ? "Orphaned Source is retained. Edit it if needed, then restore it as a new Managed Text Object."
+            : "Orphaned Source is retained in this tab. Its metadata is unavailable; copy the source or discard it."
         : unmanaged
           ? retainedDraftSource !== null
             ? "Unmanaged Text Object. Draft Source from undone Adoption is retained below. Redo or adopt again to edit it."
@@ -210,6 +217,17 @@ const authoring = mountAuthoringEditor(
     restoreOrphanedButton.hidden = !orphaned;
     restoreOrphanedButton.disabled =
       !canRestoreOrphaned || !canApply || adapter.state.kind !== "ready";
+    discardOrphanedButton.hidden = !orphaned;
+    orphanedSources.replaceChildren();
+    for (const source of availableOrphans) {
+      if (source.id === orphaned?.id) continue;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `Open Orphaned Source: ${source.targetLabel}`;
+      button.addEventListener("click", () => authoring.openOrphaned(source.id));
+      orphanedSources.append(button);
+    }
+    orphanedSources.hidden = orphanedSources.childElementCount === 0;
     unmanagedSource.hidden = !unmanaged;
     unmanagedSource.textContent = unmanaged?.renderedLatex ?? "";
     retainedDraft.hidden = retainedDraftSource === null;
@@ -260,6 +278,11 @@ adoptButton.addEventListener("click", () => {
 });
 restoreOrphanedButton.addEventListener("click", () => {
   void authoring.restoreOrphaned().catch(reportActionError);
+});
+discardOrphanedButton.addEventListener("click", () => {
+  if (!window.confirm("Discard this Orphaned Source and its Draft Source?"))
+    return;
+  void authoring.discardOrphaned().catch(reportActionError);
 });
 insertObject.addEventListener("click", () => authoring.startInsertion());
 cancelInsertion.addEventListener("click", () => authoring.cancelInsertion());

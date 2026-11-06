@@ -242,6 +242,13 @@ test("target deletion retains Orphaned Source and restores a new managed target"
   await expect(page.locator("#target-label")).toHaveText(
     `Orphaned Source: ${label}`,
   );
+  await page.getByRole("button", { name: "New Managed Text" }).click();
+  await page
+    .getByRole("button", { name: `Open Orphaned Source: ${label}` })
+    .click();
+  await expect(page.locator("#target-label")).toHaveText(
+    `Orphaned Source: ${label}`,
+  );
   await page
     .getByRole("button", { name: "Restore Orphaned Source as new text" })
     .click();

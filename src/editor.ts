@@ -27,6 +27,7 @@ export interface AuthoringUiState {
   target: ManagedText | null;
   unmanaged: { label: string; renderedLatex: string } | null;
   orphaned: OrphanedText | null;
+  availableOrphans: OrphanedText[];
   canRestoreOrphaned: boolean;
   retainedDraftSource: string | null;
   hasDraft: boolean;
@@ -160,6 +161,8 @@ export function mountAuthoringEditor(
   editSelectedText: () => boolean;
   adopt: () => Promise<ManagedText>;
   restoreOrphaned: () => Promise<ManagedText>;
+  openOrphaned: (id: string) => void;
+  discardOrphaned: () => Promise<void>;
   discardDraft: () => void;
   reportActionError: (error: unknown) => Promise<void>;
   clearActionError: () => void;
@@ -176,6 +179,7 @@ export function mountAuthoringEditor(
       target: workspace.target,
       unmanaged: workspace.unmanagedTarget,
       orphaned: workspace.orphanedTarget,
+      availableOrphans: workspace.availableOrphans,
       canRestoreOrphaned: workspace.canRestoreOrphaned,
       retainedDraftSource: workspace.retainedDraftSource,
       hasDraft: workspace.hasDraft,
@@ -350,6 +354,14 @@ export function mountAuthoringEditor(
       const target = await workspace.restoreOrphaned();
       showTarget();
       return target;
+    },
+    openOrphaned: (id) => {
+      workspace.openOrphaned(id);
+      showTarget();
+    },
+    discardOrphaned: async () => {
+      await workspace.discardOrphaned();
+      showTarget();
     },
     discardDraft: () => workspace.discardDraft(),
     reportActionError: (error) =>

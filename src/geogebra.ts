@@ -206,6 +206,9 @@ export class GeoGebraAdapter {
   private recoveredLabels = new Map<string, string>();
   private recoveryCandidates = new Map<string, string[]>();
   private recoveryMetadataValue = "";
+  private readonly deletedManagedIds = new Set<string>();
+  private readonly ambiguousExactIds = new Set<string>();
+  private historyReconcile = false;
   private renameQueue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -268,6 +271,13 @@ export class GeoGebraAdapter {
       this.emit({ kind: "object", change: "update", label }),
     );
     api.registerRemoveListener?.((label) => {
+      queueMicrotask(() => {
+        if (api.getObjectType?.(label) === "text") return;
+        for (const [id, document] of Object.entries(
+          this.metadata().envelope.documents,
+        ))
+          if (document.targetLabel === label) this.deletedManagedIds.add(id);
+      });
       this.selectedLabels.delete(label);
       this.emit({ kind: "object", change: "remove", label });
       this.selectionChanged();
@@ -307,6 +317,7 @@ export class GeoGebraAdapter {
         else this.selectedLabels.clear();
         this.selectionChanged();
       } else if (event.type === "undo" || event.type === "redo") {
+        this.historyReconcile = true;
         this.emit({ kind: event.type });
       }
     });
@@ -321,6 +332,9 @@ export class GeoGebraAdapter {
     this.selectedLabels.clear();
     this.recoveredLabels.clear();
     this.recoveryCandidates.clear();
+    this.deletedManagedIds.clear();
+    this.ambiguousExactIds.clear();
+    this.historyReconcile = false;
     this.element.replaceChildren();
     this.changeState({ kind: "loading" });
 
@@ -457,7 +471,7 @@ export class GeoGebraAdapter {
       ...(renamed ? [{ ...renamed, label: oldLabel }] : []),
     ];
     let changed = false;
-    for (const document of Object.values(metadata.envelope.documents)) {
+    for (const [id, document] of Object.entries(metadata.envelope.documents)) {
       const source = rewriteGlobalReferences(
         document.source,
         oldLabel,
@@ -465,12 +479,15 @@ export class GeoGebraAdapter {
         beforeSymbols,
       ).source;
       const targetLabel =
-        document.targetLabel === oldLabel ? label : document.targetLabel;
+        document.targetLabel === oldLabel && !this.deletedManagedIds.has(id)
+          ? label
+          : document.targetLabel;
       if (source === document.source && targetLabel === document.targetLabel)
         continue;
       document.source = source;
       document.targetLabel = targetLabel;
-      document.compiledFingerprint = await this.fingerprint(targetLabel);
+      if (api.getObjectType?.(targetLabel) === "text")
+        document.compiledFingerprint = await this.fingerprint(targetLabel);
       changed = true;
     }
     if (!changed) return;
@@ -537,18 +554,23 @@ export class GeoGebraAdapter {
         id,
         ...document,
         targetLabel:
-          api.getObjectType?.(document.targetLabel) === "text"
+          api.getObjectType?.(document.targetLabel) === "text" &&
+          !this.deletedManagedIds.has(id)
             ? document.targetLabel
             : recoveryValid
               ? (this.recoveredLabels.get(id) ?? document.targetLabel)
               : document.targetLabel,
       }))
       .filter(
-        (document) => api.getObjectType?.(document.targetLabel) === "text",
+        (document) =>
+          !this.deletedManagedIds.has(document.id) &&
+          !this.ambiguousExactIds.has(document.id) &&
+          api.getObjectType?.(document.targetLabel) === "text",
       );
   }
 
   getOrphanedTexts(): OrphanedText[] {
+    if (this.currentState.kind !== "ready") return [];
     const managed = new Set(this.getManagedTexts().map((text) => text.id));
     const metadata = this.metadata();
     const recoveryValid =
@@ -564,6 +586,32 @@ export class GeoGebraAdapter {
           ? (this.recoveryCandidates.get(id) ?? [])
           : [],
       }));
+  }
+
+  async discardOrphanedText(id: string): Promise<void> {
+    const api = this.readyApi();
+    const metadata = this.metadata();
+    if (
+      !metadata.label ||
+      !metadata.envelope.documents[id] ||
+      this.getManagedTexts().some((text) => text.id === id)
+    )
+      throw new Error("Orphaned Source is no longer available.");
+    const snapshot = api.getXML?.();
+    if (!snapshot || !api.setXML || !api.setUndoPoint)
+      throw new Error("GeoGebra cannot discard Orphaned Source safely.");
+    delete metadata.envelope.documents[id];
+    try {
+      this.writeMetadata(metadata.label, metadata.envelope);
+      if (this.metadata().envelope.documents[id])
+        throw new Error("GeoGebra retained the discarded Orphaned Source.");
+      api.setUndoPoint();
+      this.deletedManagedIds.delete(id);
+      await this.reconcileMetadata();
+    } catch (error) {
+      api.setXML(snapshot);
+      throw error;
+    }
   }
 
   async restoreOrphanedText(
@@ -619,6 +667,7 @@ export class GeoGebraAdapter {
       metadata.envelope.documents[id] = updated;
       this.writeMetadata(metadata.label, metadata.envelope);
       api.setUndoPoint();
+      this.deletedManagedIds.delete(id);
       await this.reconcileMetadata();
       return { id, ...updated };
     } catch (error) {
@@ -633,10 +682,27 @@ export class GeoGebraAdapter {
     const metadataValue = metadata.label
       ? String(api.getValueString?.(metadata.label) ?? "")
       : "";
+    if (this.historyReconcile) {
+      this.historyReconcile = false;
+      for (const [id, document] of Object.entries(metadata.envelope.documents))
+        if (api.getObjectType?.(document.targetLabel) !== "text")
+          this.deletedManagedIds.add(id);
+      for (const id of this.deletedManagedIds) {
+        const document = metadata.envelope.documents[id];
+        if (
+          document &&
+          api.getObjectType?.(document.targetLabel) === "text" &&
+          (await this.fingerprint(document.targetLabel)) ===
+            document.compiledFingerprint
+        )
+          this.deletedManagedIds.delete(id);
+      }
+    }
     if (!allowRecovery) {
       if (metadataValue !== this.recoveryMetadataValue) {
         this.recoveredLabels.clear();
         this.recoveryCandidates.clear();
+        this.ambiguousExactIds.clear();
         this.recoveryMetadataValue = metadataValue;
       } else {
         for (const [id, label] of this.recoveredLabels)
@@ -647,12 +713,42 @@ export class GeoGebraAdapter {
     }
     this.recoveredLabels.clear();
     this.recoveryCandidates.clear();
+    this.ambiguousExactIds.clear();
     this.recoveryMetadataValue = metadataValue;
     const documents = Object.entries(metadata.envelope.documents);
+    const exactLabels = new Map<string, string[]>();
+    for (const [id, document] of documents) {
+      if (
+        this.deletedManagedIds.has(id) ||
+        api.getObjectType?.(document.targetLabel) !== "text"
+      )
+        continue;
+      const ids = exactLabels.get(document.targetLabel) ?? [];
+      ids.push(id);
+      exactLabels.set(document.targetLabel, ids);
+    }
+    for (const ids of exactLabels.values())
+      if (ids.length > 1) for (const id of ids) this.ambiguousExactIds.add(id);
+    for (const [id, document] of documents) {
+      if (
+        this.deletedManagedIds.has(id) ||
+        this.ambiguousExactIds.has(id) ||
+        api.getObjectType?.(document.targetLabel) !== "text" ||
+        !/^sha256:[0-9a-f]{64}$/.test(document.compiledFingerprint)
+      )
+        continue;
+      if (
+        (await this.fingerprint(document.targetLabel)) !==
+        document.compiledFingerprint
+      )
+        this.ambiguousExactIds.add(id);
+    }
     const reserved = new Set(
       documents
         .filter(
-          ([, document]) =>
+          ([id, document]) =>
+            !this.deletedManagedIds.has(id) &&
+            !this.ambiguousExactIds.has(id) &&
             api.getObjectType?.(document.targetLabel) === "text",
         )
         .map(([, document]) => document.targetLabel),
@@ -672,7 +768,9 @@ export class GeoGebraAdapter {
     const matchesById = new Map(
       documents
         .filter(
-          ([, document]) =>
+          ([id, document]) =>
+            this.deletedManagedIds.has(id) ||
+            this.ambiguousExactIds.has(id) ||
             api.getObjectType?.(document.targetLabel) !== "text",
         )
         .map(

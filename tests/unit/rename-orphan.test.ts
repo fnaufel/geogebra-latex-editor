@@ -206,3 +206,43 @@ it("does not attach a deleted target to an unrelated identical text", async () =
     { id: "one", source: "literal" },
   ]);
 });
+
+it("keeps a deleted target's fingerprint when a referenced object is renamed", async () => {
+  const labels = ["text1", "a"];
+  const { adapter, envelope, setFingerprint, rename } = await fixture(
+    labels,
+    "@a@",
+  );
+  const fingerprint = "sha256:original-target-command";
+  setFingerprint(fingerprint);
+  labels.splice(labels.indexOf("text1"), 1);
+  rename("a", "b");
+  await vi.waitFor(() => expect(envelope().documents.one?.source).toBe("@b@"));
+  expect(envelope().documents.one?.compiledFingerprint).toBe(fingerprint);
+  expect(adapter.getOrphanedTexts()).toMatchObject([
+    { id: "one", source: "@b@", compiledFingerprint: fingerprint },
+  ]);
+});
+
+it("discards only an orphaned metadata record with one undo point", async () => {
+  const labels = ["text1"];
+  const { adapter, envelope, api } = await fixture(labels);
+  labels.pop();
+  await adapter.discardOrphanedText("one");
+  expect(envelope().documents).toEqual({});
+  expect(adapter.getOrphanedTexts()).toEqual([]);
+  expect(api.setUndoPoint).toHaveBeenCalledOnce();
+});
+
+it("leaves duplicate exact-label metadata claims unresolved on load", async () => {
+  const { adapter, api, envelope } = await fixture(["text1"]);
+  const duplicate = envelope();
+  duplicate.documents.two = { ...duplicate.documents.one! };
+  api.evalCommand(`gglatexEditorMetadataV1="${encodeMetadata(duplicate)}"`);
+  await adapter.reconcileMetadata();
+  expect(adapter.getManagedTexts()).toEqual([]);
+  expect(adapter.getOrphanedTexts()).toMatchObject([
+    { id: "one", targetLabel: "text1" },
+    { id: "two", targetLabel: "text1" },
+  ]);
+});

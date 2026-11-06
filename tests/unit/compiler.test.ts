@@ -42,6 +42,18 @@ describe("v1 Authoring Source", () => {
     expect(invalid.source).toBe("@a+unknown@");
     expect(invalid.ambiguous).toEqual([{ from: 1, to: 2 }]);
   });
+
+  it("does not guess at local variables in an unsupported binding command", () => {
+    const result = rewriteGlobalReferences("@Sequence(a+n,n,1,3)@", "n", "m", [
+      ...symbols,
+      { label: "n", type: "number", defined: true },
+    ]);
+    expect(result.source).toBe("@Sequence(a+n,n,1,3)@");
+    expect(result.ambiguous).toEqual([
+      { from: 12, to: 13 },
+      { from: 14, to: 15 },
+    ]);
+  });
   it("compiles empty and literal-only source without evaluating it", () => {
     expect(compile("").expression).toBe('FormulaText(Simplify(""))');
     expect(compile("x^2").expression).toBe('FormulaText(Simplify("x^2"))');
