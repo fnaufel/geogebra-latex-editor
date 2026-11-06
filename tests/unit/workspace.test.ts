@@ -34,7 +34,6 @@ it("keeps source and simplification as a draft until explicit Apply", async () =
       _id: string,
       source: string,
       simplify: boolean,
-      _expression: string,
     ) => {
       applied = {
         ...applied,
