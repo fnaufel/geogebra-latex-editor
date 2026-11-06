@@ -21,11 +21,13 @@ import {
   type SymbolInfo,
 } from "./compiler";
 import { AuthoringWorkspace } from "./workspace";
-import type { GeoGebraAdapter, ManagedText } from "./geogebra";
+import type { GeoGebraAdapter, ManagedText, OrphanedText } from "./geogebra";
 
 export interface AuthoringUiState {
   target: ManagedText | null;
   unmanaged: { label: string; renderedLatex: string } | null;
+  orphaned: OrphanedText | null;
+  canRestoreOrphaned: boolean;
   retainedDraftSource: string | null;
   hasDraft: boolean;
   diverged: boolean;
@@ -157,6 +159,7 @@ export function mountAuthoringEditor(
   hasAnyDraft: () => boolean;
   editSelectedText: () => boolean;
   adopt: () => Promise<ManagedText>;
+  restoreOrphaned: () => Promise<ManagedText>;
   discardDraft: () => void;
   reportActionError: (error: unknown) => Promise<void>;
   clearActionError: () => void;
@@ -172,6 +175,8 @@ export function mountAuthoringEditor(
     onState({
       target: workspace.target,
       unmanaged: workspace.unmanagedTarget,
+      orphaned: workspace.orphanedTarget,
+      canRestoreOrphaned: workspace.canRestoreOrphaned,
       retainedDraftSource: workspace.retainedDraftSource,
       hasDraft: workspace.hasDraft,
       diverged: workspace.diverged,
@@ -184,12 +189,14 @@ export function mountAuthoringEditor(
       recoveryAvailable: workspace.recoveryAvailable,
     });
   const render = (result: CompileResult) => {
-    if ((workspace.target?.id ?? null) !== shownId) {
+    if (
+      (workspace.target?.id ?? workspace.orphanedTarget?.id ?? null) !== shownId
+    ) {
       showTarget();
       return;
     }
     if (
-      workspace.target?.id === shownId &&
+      (workspace.target?.id ?? workspace.orphanedTarget?.id) === shownId &&
       view.state.doc.toString() !== workspace.currentSource
     ) {
       replacing = true;
@@ -287,7 +294,7 @@ export function mountAuthoringEditor(
   render(workspace.result);
   function showTarget(): void {
     if (shownId) states.set(shownId, view.state);
-    const nextId = workspace.target?.id ?? null;
+    const nextId = workspace.target?.id ?? workspace.orphanedTarget?.id ?? null;
     replacing = true;
     if (
       nextId !== shownId ||
@@ -336,6 +343,11 @@ export function mountAuthoringEditor(
     },
     adopt: async () => {
       const target = await workspace.adopt(true);
+      showTarget();
+      return target;
+    },
+    restoreOrphaned: async () => {
+      const target = await workspace.restoreOrphaned();
       showTarget();
       return target;
     },

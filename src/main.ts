@@ -48,6 +48,7 @@ root.innerHTML = `
         <div class="editor-actions">
           <button id="edit-selected" type="button" disabled>Edit selected text</button>
           <button id="adopt" type="button" hidden>Adopt text</button>
+          <button id="restore-orphaned" type="button" hidden>Restore Orphaned Source as new text</button>
           <button id="insert-object" type="button" disabled>Insert Object</button>
           <button id="cancel-insertion" type="button" hidden>Cancel insertion</button>
           <button id="apply" type="button" disabled>Apply</button>
@@ -111,6 +112,7 @@ const selectionState = required<HTMLElement>("#selection-state");
 const interactionState = required<HTMLElement>("#interaction-state");
 const editSelected = required<HTMLButtonElement>("#edit-selected");
 const adoptButton = required<HTMLButtonElement>("#adopt");
+const restoreOrphanedButton = required<HTMLButtonElement>("#restore-orphaned");
 const insertObject = required<HTMLButtonElement>("#insert-object");
 const cancelInsertion = required<HTMLButtonElement>("#cancel-insertion");
 const applyButton = required<HTMLButtonElement>("#apply");
@@ -164,6 +166,8 @@ const authoring = mountAuthoringEditor(
   ({
     target,
     unmanaged,
+    orphaned,
+    canRestoreOrphaned,
     retainedDraftSource,
     hasDraft,
     diverged,
@@ -179,24 +183,33 @@ const authoring = mountAuthoringEditor(
       ? `Editing Target: ${target.targetLabel}`
       : unmanaged
         ? `Editing Target: ${unmanaged.label}`
-        : "No Editing Target";
+        : orphaned
+          ? `Orphaned Source: ${orphaned.targetLabel}`
+          : "No Editing Target";
     targetState.textContent =
       actionError ??
-      (unmanaged
-        ? retainedDraftSource !== null
-          ? "Unmanaged Text Object. Draft Source from undone Adoption is retained below. Redo or adopt again to edit it."
-          : "Unmanaged Text Object. This is a read-only snapshot of its current rendered LaTeX. Adopt to create Authoring Source."
-        : target
-          ? hasDraft
-            ? diverged
-              ? "Diverged Draft: Applied Source changed in GeoGebra. Reapply or discard this draft."
-              : "Draft Source has unapplied changes."
-            : "Applied Source is current."
-          : recoveryAvailable
-            ? "A failed Apply snapshot and Draft Source are available to restore."
-            : "No text is open for editing.");
+      (orphaned
+        ? orphaned.candidates.length
+          ? `Orphaned Source. Multiple possible targets (${orphaned.candidates.join(", ")}); choose a new target or resolve the uncertainty manually.`
+          : "Orphaned Source is retained. Edit it if needed, then restore it as a new Managed Text Object."
+        : unmanaged
+          ? retainedDraftSource !== null
+            ? "Unmanaged Text Object. Draft Source from undone Adoption is retained below. Redo or adopt again to edit it."
+            : "Unmanaged Text Object. This is a read-only snapshot of its current rendered LaTeX. Adopt to create Authoring Source."
+          : target
+            ? hasDraft
+              ? diverged
+                ? "Diverged Draft: Applied Source changed in GeoGebra. Reapply or discard this draft."
+                : "Draft Source has unapplied changes."
+              : "Applied Source is current."
+            : recoveryAvailable
+              ? "A failed Apply snapshot and Draft Source are available to restore."
+              : "No text is open for editing.");
     applyButton.disabled = !target || !hasDraft || !canApply;
     adoptButton.hidden = !unmanaged;
+    restoreOrphanedButton.hidden = !orphaned;
+    restoreOrphanedButton.disabled =
+      !canRestoreOrphaned || !canApply || adapter.state.kind !== "ready";
     unmanagedSource.hidden = !unmanaged;
     unmanagedSource.textContent = unmanaged?.renderedLatex ?? "";
     retainedDraft.hidden = retainedDraftSource === null;
@@ -244,6 +257,9 @@ adoptButton.addEventListener("click", () => {
     return;
   }
   void authoring.adopt().catch(reportActionError);
+});
+restoreOrphanedButton.addEventListener("click", () => {
+  void authoring.restoreOrphaned().catch(reportActionError);
 });
 insertObject.addEventListener("click", () => authoring.startInsertion());
 cancelInsertion.addEventListener("click", () => authoring.cancelInsertion());

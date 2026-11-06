@@ -478,3 +478,151 @@ it("keeps Apply failure diagnostics with workspace state until the draft is disc
   workspace.discardDraft();
   expect(workspace.actionError).toBeNull();
 });
+
+it("keeps a pinned target and its draft when the target is renamed", async () => {
+  vi.useFakeTimers();
+  let text: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "@a@",
+    simplify: true,
+    compiledFingerprint: "one",
+  };
+  let emit: (event: ConstructionEvent) => void = () => {};
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => [
+      { label: "a", type: "number", defined: true },
+      { label: text.targetLabel, type: "text", defined: true },
+    ],
+    getUnmanagedTextSnapshot: () => "",
+    adoptUnmanagedText: async () => text,
+    createManagedText: async () => text,
+    applyManagedText: async () => text,
+    importBase64: async () => {},
+    getManagedTexts: () => [text],
+    exportBase64: async () => "",
+    onEvent: (listener) => {
+      emit = listener;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  workspace.setSource("draft @a@");
+  text = { ...text, targetLabel: "renamed" };
+  emit({ kind: "rename", oldLabel: "text1", label: "renamed" });
+  await vi.runAllTimersAsync();
+  expect(workspace.target).toMatchObject({ id: "one", targetLabel: "renamed" });
+  expect(workspace.currentSource).toBe("draft @a@");
+  expect(workspace.hasDraft).toBe(true);
+});
+
+it("rewrites proven references in drafts after a live rename and distinguishes deletion from undefined values", async () => {
+  vi.useFakeTimers();
+  let symbols = [
+    { label: "a", type: "number", defined: true },
+    { label: "text1", type: "text", defined: true },
+  ];
+  const text: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "@a@",
+    simplify: true,
+    compiledFingerprint: "one",
+  };
+  let emit: (event: ConstructionEvent) => void = () => {};
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => symbols,
+    getUnmanagedTextSnapshot: () => "",
+    adoptUnmanagedText: async () => text,
+    createManagedText: async () => text,
+    applyManagedText: async () => text,
+    importBase64: async () => {},
+    getManagedTexts: () => [text],
+    exportBase64: async () => "",
+    onEvent: (listener) => {
+      emit = listener;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  workspace.setSource('@a+Text("a")@');
+  symbols = [{ label: "b", type: "number", defined: true }, symbols[1]!];
+  emit({ kind: "rename", oldLabel: "a", label: "b" });
+  await vi.runAllTimersAsync();
+  expect(workspace.currentSource).toBe('@b+Text("a")@');
+  symbols = [{ ...symbols[0]!, defined: false }, symbols[1]!];
+  emit({ kind: "object", change: "update", label: "b" });
+  await vi.runAllTimersAsync();
+  expect(workspace.result.diagnostics.map(({ code }) => code)).toContain(
+    "undefined-value",
+  );
+  symbols = [symbols[1]!];
+  emit({ kind: "object", change: "remove", label: "b" });
+  await vi.runAllTimersAsync();
+  expect(workspace.result.diagnostics.map(({ code }) => code)).toContain(
+    "unresolved-reference",
+  );
+  expect(workspace.currentSource).toBe('@b+Text("a")@');
+});
+
+it("preserves Orphaned Source on target deletion, reattaches on undo, and restores to a new target", async () => {
+  vi.useFakeTimers();
+  const original: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "body",
+    simplify: true,
+    compiledFingerprint: "one",
+  };
+  let texts: ManagedText[] = [original];
+  let emit: (event: ConstructionEvent) => void = () => {};
+  const restoreOrphanedText = vi.fn(async () => {
+    const restored = { ...original, targetLabel: "text2" };
+    texts = [restored];
+    return restored;
+  });
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () =>
+      texts.map(({ targetLabel }) => ({
+        label: targetLabel,
+        type: "text",
+        defined: true,
+      })),
+    getUnmanagedTextSnapshot: () => "",
+    adoptUnmanagedText: async () => original,
+    createManagedText: async () => original,
+    applyManagedText: async () => original,
+    importBase64: async () => {},
+    getManagedTexts: () => texts,
+    getOrphanedTexts: () =>
+      texts.length ? [] : [{ ...original, candidates: [] }],
+    restoreOrphanedText,
+    exportBase64: async () => "",
+    onEvent: (listener) => {
+      emit = listener;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  workspace.setSource("my draft");
+  texts = [];
+  emit({ kind: "object", change: "remove", label: "text1" });
+  await vi.runAllTimersAsync();
+  expect(workspace.orphanedTarget).toMatchObject({ id: "one", source: "body" });
+  expect(workspace.currentSource).toBe("my draft");
+  texts = [original];
+  emit({ kind: "undo" });
+  await vi.runAllTimersAsync();
+  expect(workspace.target?.id).toBe("one");
+  expect(workspace.currentSource).toBe("my draft");
+  texts = [];
+  emit({ kind: "redo" });
+  await vi.runAllTimersAsync();
+  await workspace.restoreOrphaned();
+  expect(restoreOrphanedText).toHaveBeenCalledWith("one", "my draft", true);
+  expect(workspace.target?.targetLabel).toBe("text2");
+  expect(workspace.currentSource).toBe("my draft");
+});

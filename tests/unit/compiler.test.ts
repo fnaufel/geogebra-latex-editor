@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compileSource } from "../../src/compiler";
+import { compileSource, rewriteGlobalReferences } from "../../src/compiler";
 
 const symbols = [
   { label: "a", type: "number", defined: true },
@@ -11,6 +11,37 @@ const compile = (source: string, simplify = true) =>
   compileSource(source, { simplify, symbols });
 
 describe("v1 Authoring Source", () => {
+  it("rewrites only proven global references during a rename", () => {
+    const source = 'literal a @a+Text("a")@ @Name(a)@ @x@ @a_1@';
+    const result = rewriteGlobalReferences(source, "a", "renamed", [
+      ...symbols,
+      { label: "a_1", type: "number", defined: true },
+    ]);
+    expect(result.source).toBe(
+      'literal a @renamed+Text("a")@ @Name(renamed)@ @x@ @a_1@',
+    );
+    expect(result.ambiguous).toEqual([]);
+  });
+
+  it("leaves ambiguous coordinate names unchanged and asks for manual resolution", () => {
+    const result = rewriteGlobalReferences("@x+a@", "x", "u", [
+      ...symbols,
+      { label: "x", type: "number", defined: true },
+    ]);
+    expect(result.source).toBe("@x+a@");
+    expect(result.ambiguous).toEqual([{ from: 1, to: 2 }]);
+  });
+
+  it("keeps pure function names and invalid expressions unchanged during rename", () => {
+    const functionName = rewriteGlobalReferences("@sin(a)@", "sin", "wave", [
+      ...symbols,
+      { label: "sin", type: "function", defined: true },
+    ]);
+    expect(functionName).toEqual({ source: "@sin(a)@", ambiguous: [] });
+    const invalid = rewriteGlobalReferences("@a+unknown@", "a", "b", symbols);
+    expect(invalid.source).toBe("@a+unknown@");
+    expect(invalid.ambiguous).toEqual([{ from: 1, to: 2 }]);
+  });
   it("compiles empty and literal-only source without evaluating it", () => {
     expect(compile("").expression).toBe('FormulaText(Simplify(""))');
     expect(compile("x^2").expression).toBe('FormulaText(Simplify("x^2"))');

@@ -1,8 +1,15 @@
-import { compileSource, type CompileResult, type SymbolInfo } from "./compiler";
+import {
+  compileSource,
+  rewriteGlobalReferences,
+  type CompileResult,
+  type SourceRange,
+  type SymbolInfo,
+} from "./compiler";
 import {
   ApplyFailure,
   type ConstructionEvent,
   type ManagedText,
+  type OrphanedText,
 } from "./geogebra";
 import {
   clearFailedApplyRecovery,
@@ -27,6 +34,13 @@ export interface WorkspaceAdapter {
   ): Promise<ManagedText>;
   importBase64(base64: string): Promise<void>;
   getManagedTexts(): ManagedText[];
+  getOrphanedTexts?(): OrphanedText[];
+  restoreOrphanedText?(
+    id: string,
+    source: string,
+    simplify: boolean,
+  ): Promise<ManagedText>;
+  reconcileMetadata?(allowRecovery?: boolean): Promise<void>;
   exportBase64(): Promise<string>;
   onEvent?(listener: (event: ConstructionEvent) => void): () => void;
   readonly recoverableApplySnapshot?: string | null;
@@ -45,6 +59,7 @@ export class AuthoringWorkspace {
     renderedLatex: string;
     formerManagedId?: string;
   } | null = null;
+  private orphaned: OrphanedText | null = null;
   private selected: readonly SymbolInfo[] = [];
   private readonly drafts = new Map<
     string,
@@ -56,6 +71,9 @@ export class AuthoringWorkspace {
   >();
   private readonly undoneAdoptions = new Map<string, string>();
   private resyncTimer: ReturnType<typeof setTimeout> | undefined;
+  private renamePending = false;
+  private historyPending = false;
+  private manualRenameRanges: SourceRange[] = [];
   private insertionRange: { from: number; to: number } | null = null;
   private insertionQueued = false;
   private insertionGeneration = 0;
@@ -229,6 +247,20 @@ export class AuthoringWorkspace {
     return target;
   }
 
+  async restoreOrphaned(): Promise<ManagedText> {
+    if (!this.orphaned || !this.adapter?.restoreOrphanedText)
+      throw new Error("No Orphaned Source is available for restoration.");
+    const target = await this.adapter.restoreOrphanedText(
+      this.orphaned.id,
+      this.source,
+      this.simplify,
+    );
+    this.loadTarget(target);
+    this.message = `Orphaned Source restored as ${target.targetLabel}.`;
+    this.notify(this.compiled);
+    return target;
+  }
+
   startInsertion(from: number, to: number): void {
     if (!this.editingTarget)
       throw new Error("Choose an Editing Target before inserting an object.");
@@ -249,6 +281,11 @@ export class AuthoringWorkspace {
   }
 
   private handleEvent(event: ConstructionEvent): void {
+    if (event.kind === "metadata-error") {
+      this.actionErrorMessage = event.message;
+      this.notify(this.compiled);
+      return;
+    }
     if (event.kind === "selection") {
       this.selected = event.selected;
       if (this.insertionRange) {
@@ -284,6 +321,48 @@ export class AuthoringWorkspace {
       this.notify(this.compiled);
       return;
     }
+    if (event.kind === "rename") {
+      const afterSymbols = this.adapter?.getSymbols() ?? this.symbols;
+      const renamed = afterSymbols.find(
+        (symbol) => symbol.label === event.label,
+      );
+      const oldSymbols = [
+        ...afterSymbols.filter((symbol) => symbol.label !== event.label),
+        ...(renamed ? [{ ...renamed, label: event.oldLabel }] : []),
+      ];
+      for (const [id, draft] of this.drafts) {
+        const rewritten = rewriteGlobalReferences(
+          draft.source,
+          event.oldLabel,
+          event.label,
+          oldSymbols,
+        );
+        this.drafts.set(id, { ...draft, source: rewritten.source });
+        if (this.editingTarget?.id === id) {
+          this.source = rewritten.source;
+          this.manualRenameRanges = rewritten.ambiguous;
+        }
+      }
+      for (const [id, baseline] of this.draftBaselines) {
+        this.draftBaselines.set(id, {
+          ...baseline,
+          source: rewriteGlobalReferences(
+            baseline.source,
+            event.oldLabel,
+            event.label,
+            oldSymbols,
+          ).source,
+        });
+      }
+      this.selected = this.selected.map((symbol) =>
+        symbol.label === event.oldLabel
+          ? { ...symbol, label: event.label }
+          : symbol,
+      );
+      this.renamePending = true;
+    }
+    if (event.kind === "undo" || event.kind === "redo")
+      this.historyPending = true;
     if (
       event.kind === "object" ||
       event.kind === "rename" ||
@@ -295,18 +374,42 @@ export class AuthoringWorkspace {
       if (this.resyncTimer) clearTimeout(this.resyncTimer);
       this.resyncTimer = setTimeout(() => {
         this.resyncTimer = undefined;
-        this.resynchronize();
+        void this.resynchronize().catch((error: unknown) => {
+          this.actionErrorMessage =
+            error instanceof Error
+              ? error.message
+              : "Construction resynchronization failed.";
+          this.notify(this.compiled);
+        });
       }, 0);
     }
   }
 
-  private resynchronize(): void {
+  private async resynchronize(): Promise<void> {
+    await this.adapter?.reconcileMetadata?.(false);
     const current = this.editingTarget;
     const managed = this.adapter?.getManagedTexts() ?? [];
+    if (this.orphaned) {
+      const reattached = managed.find((text) => text.id === this.orphaned?.id);
+      if (reattached) this.loadTarget(reattached);
+      else
+        this.orphaned =
+          this.adapter
+            ?.getOrphanedTexts?.()
+            .find((text) => text.id === this.orphaned?.id) ?? this.orphaned;
+    }
     const applied = managed.find((text) => text.id === current?.id);
     if (current && applied) {
       const dirty = this.hasDraft;
       this.editingTarget = applied;
+      if (this.renamePending) {
+        const baseline = this.draftBaselines.get(applied.id);
+        if (baseline)
+          this.draftBaselines.set(applied.id, {
+            ...baseline,
+            compiledFingerprint: applied.compiledFingerprint,
+          });
+      }
       if (!dirty) {
         this.source = applied.source;
         this.simplify = applied.simplify;
@@ -315,6 +418,7 @@ export class AuthoringWorkspace {
       }
     } else if (
       current &&
+      this.historyPending &&
       this.adapter
         ?.getSymbols()
         .some(
@@ -332,6 +436,24 @@ export class AuthoringWorkspace {
         ),
         formerManagedId: current.id,
       };
+    } else if (current) {
+      if (this.hasDraft)
+        this.drafts.set(current.id, {
+          source: this.source,
+          simplify: this.simplify,
+        });
+      this.orphaned = this.adapter
+        ?.getOrphanedTexts?.()
+        .find((text) => text.id === current.id) ?? {
+        ...current,
+        candidates: [],
+      };
+      this.editingTarget = null;
+      this.message = this.adapter
+        ?.getSymbols()
+        .some((symbol) => symbol.label === current.targetLabel)
+        ? `Authoring Source metadata changed externally. Source is retained in this tab; target identity is uncertain.`
+        : `${current.targetLabel} was deleted. Its Authoring Source is retained as Orphaned Source.`;
     } else if (this.unmanaged) {
       const restored = managed.find(
         (text) => text.targetLabel === this.unmanaged?.label,
@@ -356,11 +478,26 @@ export class AuthoringWorkspace {
         };
     }
     this.symbols = this.adapter?.getSymbols() ?? this.symbols;
+    this.renamePending = false;
+    this.historyPending = false;
     this.validateNow();
   }
 
   get target(): ManagedText | null {
     return this.editingTarget;
+  }
+
+  get orphanedTarget(): OrphanedText | null {
+    return this.orphaned;
+  }
+
+  get canRestoreOrphaned(): boolean {
+    return (
+      !!this.orphaned &&
+      !!this.adapter
+        ?.getOrphanedTexts?.()
+        .some((text) => text.id === this.orphaned?.id)
+    );
   }
 
   get unmanagedTarget(): { label: string; renderedLatex: string } | null {
@@ -381,10 +518,10 @@ export class AuthoringWorkspace {
   }
 
   get hasDraft(): boolean {
+    const baseline = this.editingTarget ?? this.orphaned;
     return (
-      this.editingTarget !== null &&
-      (this.source !== this.editingTarget.source ||
-        this.simplify !== this.editingTarget.simplify)
+      baseline !== null &&
+      (this.source !== baseline.source || this.simplify !== baseline.simplify)
     );
   }
 
@@ -438,6 +575,7 @@ export class AuthoringWorkspace {
       }
     }
     this.editingTarget = target;
+    this.orphaned = null;
     this.unmanaged = null;
     const draft = target && this.drafts.get(target.id);
     this.source = draft?.source ?? target?.source ?? "";
@@ -485,6 +623,7 @@ export class AuthoringWorkspace {
     this.draftBaselines.clear();
     this.undoneAdoptions.clear();
     this.editingTarget = null;
+    this.orphaned = null;
     this.insertionRange = null;
     const target = this.adapter.getManagedTexts()[0] ?? null;
     this.loadTarget(target);
@@ -515,6 +654,7 @@ export class AuthoringWorkspace {
 
   setSource(source: string): void {
     if (this.unmanaged) return;
+    this.manualRenameRanges = [];
     this.rememberDraftBaseline();
     this.source = source;
     if (this.editingTarget)
@@ -522,6 +662,8 @@ export class AuthoringWorkspace {
         source,
         simplify: this.simplify,
       });
+    if (this.orphaned)
+      this.drafts.set(this.orphaned.id, { source, simplify: this.simplify });
     this.schedule();
   }
 
@@ -531,6 +673,8 @@ export class AuthoringWorkspace {
     this.simplify = simplify;
     if (this.editingTarget)
       this.drafts.set(this.editingTarget.id, { source: this.source, simplify });
+    if (this.orphaned)
+      this.drafts.set(this.orphaned.id, { source: this.source, simplify });
     this.schedule();
   }
 
@@ -546,6 +690,16 @@ export class AuthoringWorkspace {
       simplify: this.simplify,
       symbols: this.symbols,
     });
+    if (this.manualRenameRanges.length)
+      this.compiled.diagnostics.push(
+        ...this.manualRenameRanges.map((range) => ({
+          ...range,
+          code: "manual-rename-resolution",
+          severity: "warning" as const,
+          message:
+            "This token may refer to a renamed object. Resolve it manually.",
+        })),
+      );
     this.notify(this.compiled);
     return this.compiled;
   }

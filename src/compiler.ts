@@ -657,3 +657,54 @@ export function compileSource(
     fingerprintInput: JSON.stringify([1, normalizedSource, options.simplify]),
   };
 }
+
+/** Rewrite only names the compiler proved to be construction objects. */
+export function rewriteGlobalReferences(
+  source: string,
+  oldLabel: string,
+  newLabel: string,
+  symbols: readonly SymbolInfo[],
+): { source: string; ambiguous: SourceRange[] } {
+  const compiled = compileSource(source, { simplify: false, symbols });
+  const proven = compiled.references.filter(
+    (reference) => reference.label === oldLabel,
+  );
+  const positions = new Set(proven.map((reference) => reference.from));
+  const ambiguous: SourceRange[] = [];
+  for (const segment of compiled.segments) {
+    if (segment.kind !== "interpolation") continue;
+    const tokens = lexExpression(
+      source.slice(segment.from + 1, segment.to - 1),
+      segment.from + 1,
+      [],
+    );
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index];
+      if (
+        token?.kind === "name" &&
+        token.text === oldLabel &&
+        !positions.has(token.from) &&
+        tokens[index + 1]?.text !== "(" &&
+        tokens[index + 1]?.text !== "["
+      )
+        ambiguous.push({ from: token.from, to: token.to });
+    }
+  }
+  if (
+    compiled.diagnostics.some((diagnostic) => diagnostic.severity === "error")
+  )
+    return {
+      source,
+      ambiguous: [
+        ...ambiguous,
+        ...proven.map(({ from, to }) => ({ from, to })),
+      ],
+    };
+  let rewritten = source;
+  for (const reference of proven.reverse())
+    rewritten =
+      rewritten.slice(0, reference.from) +
+      newLabel +
+      rewritten.slice(reference.to);
+  return { source: rewritten, ambiguous };
+}

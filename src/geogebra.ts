@@ -1,4 +1,8 @@
-import { compileSource, type SymbolInfo } from "./compiler";
+import {
+  compileSource,
+  rewriteGlobalReferences,
+  type SymbolInfo,
+} from "./compiler";
 import {
   decodeMetadata,
   emptyMetadata,
@@ -25,6 +29,7 @@ export type ConstructionEvent =
   | { kind: "selection"; selected: SymbolInfo[] }
   | { kind: "object"; change: "add" | "update" | "remove"; label: string }
   | { kind: "rename"; oldLabel: string; label: string }
+  | { kind: "metadata-error"; message: string }
   | { kind: "clear" | "undo" | "redo" };
 
 function clientEvent(raw: unknown): { type: string; target: string } | null {
@@ -81,6 +86,10 @@ interface AppletApi {
 
 export interface ManagedText extends ManagedDocument {
   id: string;
+}
+
+export interface OrphanedText extends ManagedText {
+  candidates: string[];
 }
 
 export type ApplyFailureCode =
@@ -194,6 +203,10 @@ export class GeoGebraAdapter {
   private readonly selectedLabels = new Set<string>();
   private applyHalted = false;
   private failedApplySnapshot: string | null = null;
+  private recoveredLabels = new Map<string, string>();
+  private recoveryCandidates = new Map<string, string[]>();
+  private recoveryMetadataValue = "";
+  private renameQueue: Promise<void> = Promise.resolve();
 
   constructor(
     element: HTMLElement,
@@ -261,7 +274,21 @@ export class GeoGebraAdapter {
     });
     api.registerRenameListener?.((oldLabel, label) => {
       if (this.selectedLabels.delete(oldLabel)) this.selectedLabels.add(label);
-      this.emit({ kind: "rename", oldLabel, label });
+      if (Object.keys(this.metadata().envelope.documents).length === 0)
+        this.emit({ kind: "rename", oldLabel, label });
+      else
+        this.renameQueue = this.renameQueue
+          .then(() => this.handleRename(oldLabel, label))
+          .then(() => this.emit({ kind: "rename", oldLabel, label }))
+          .catch((error: unknown) => {
+            this.emit({
+              kind: "metadata-error",
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "Rename metadata could not be updated.",
+            });
+          });
       this.selectionChanged();
     });
     api.registerClearListener?.(() => {
@@ -292,6 +319,8 @@ export class GeoGebraAdapter {
     this.api?.remove?.();
     this.api = undefined;
     this.selectedLabels.clear();
+    this.recoveredLabels.clear();
+    this.recoveryCandidates.clear();
     this.element.replaceChildren();
     this.changeState({ kind: "loading" });
 
@@ -361,6 +390,7 @@ export class GeoGebraAdapter {
           );
         }
       });
+      if (this.currentState.kind === "ready") await this.reconcileMetadata();
     } catch (error) {
       if (generation !== this.generation) return;
       this.changeState({
@@ -416,6 +446,52 @@ export class GeoGebraAdapter {
     return { label: null, envelope: emptyMetadata() };
   }
 
+  private async handleRename(oldLabel: string, label: string): Promise<void> {
+    const api = this.readyApi();
+    const metadata = this.metadata();
+    if (!metadata.label) return;
+    const afterSymbols = this.getSymbols();
+    const renamed = afterSymbols.find((symbol) => symbol.label === label);
+    const beforeSymbols = [
+      ...afterSymbols.filter((symbol) => symbol.label !== label),
+      ...(renamed ? [{ ...renamed, label: oldLabel }] : []),
+    ];
+    let changed = false;
+    for (const document of Object.values(metadata.envelope.documents)) {
+      const source = rewriteGlobalReferences(
+        document.source,
+        oldLabel,
+        label,
+        beforeSymbols,
+      ).source;
+      const targetLabel =
+        document.targetLabel === oldLabel ? label : document.targetLabel;
+      if (source === document.source && targetLabel === document.targetLabel)
+        continue;
+      document.source = source;
+      document.targetLabel = targetLabel;
+      document.compiledFingerprint = await this.fingerprint(targetLabel);
+      changed = true;
+    }
+    if (!changed) return;
+    const snapshot = api.getXML?.();
+    const originalValue = String(api.getValueString?.(metadata.label) ?? "");
+    if (!snapshot || !api.setXML || !api.setUndoPoint)
+      throw new Error(
+        "GeoGebra cannot verify rename metadata or its history point.",
+      );
+    try {
+      this.writeMetadata(metadata.label, metadata.envelope);
+      api.setUndoPoint();
+      await this.reconcileMetadata();
+    } catch (error) {
+      api.setXML(snapshot);
+      if (String(api.getValueString?.(metadata.label) ?? "") !== originalValue)
+        throw new Error("Rename metadata rollback failed.", { cause: error });
+      throw error;
+    }
+  }
+
   private hasNewerMetadata(): boolean {
     const api = this.readyApi();
     for (const label of api.getAllObjectNames?.() ?? []) {
@@ -451,11 +527,174 @@ export class GeoGebraAdapter {
 
   getManagedTexts(): ManagedText[] {
     const api = this.readyApi();
-    return Object.entries(this.metadata().envelope.documents)
+    const metadata = this.metadata();
+    const recoveryValid =
+      metadata.label !== null &&
+      String(api.getValueString?.(metadata.label) ?? "") ===
+        this.recoveryMetadataValue;
+    return Object.entries(metadata.envelope.documents)
+      .map(([id, document]) => ({
+        id,
+        ...document,
+        targetLabel:
+          api.getObjectType?.(document.targetLabel) === "text"
+            ? document.targetLabel
+            : recoveryValid
+              ? (this.recoveredLabels.get(id) ?? document.targetLabel)
+              : document.targetLabel,
+      }))
       .filter(
-        ([, document]) => api.getObjectType?.(document.targetLabel) === "text",
+        (document) => api.getObjectType?.(document.targetLabel) === "text",
+      );
+  }
+
+  getOrphanedTexts(): OrphanedText[] {
+    const managed = new Set(this.getManagedTexts().map((text) => text.id));
+    const metadata = this.metadata();
+    const recoveryValid =
+      metadata.label !== null &&
+      String(this.readyApi().getValueString?.(metadata.label) ?? "") ===
+        this.recoveryMetadataValue;
+    return Object.entries(metadata.envelope.documents)
+      .filter(([id]) => !managed.has(id))
+      .map(([id, document]) => ({
+        id,
+        ...document,
+        candidates: recoveryValid
+          ? (this.recoveryCandidates.get(id) ?? [])
+          : [],
+      }));
+  }
+
+  async restoreOrphanedText(
+    id: string,
+    source?: string,
+    simplify?: boolean,
+  ): Promise<ManagedText> {
+    const api = this.readyApi();
+    const metadata = this.metadata();
+    const document = metadata.envelope.documents[id];
+    if (
+      !document ||
+      !metadata.label ||
+      this.getManagedTexts().some((text) => text.id === id)
+    )
+      throw new Error("Orphaned Source is no longer available.");
+    const restoredSource = source ?? document.source;
+    const restoredSimplify = simplify ?? document.simplify;
+    const result = compileSource(restoredSource, {
+      simplify: restoredSimplify,
+      symbols: this.getSymbols(),
+    });
+    if (!result.expression)
+      throw new Error(
+        "Resolve Authoring Source errors before restoring this Orphaned Source.",
+      );
+    const snapshot = api.getXML?.();
+    if (
+      !snapshot ||
+      !api.setXML ||
+      !api.evalCommandGetLabels ||
+      !api.evalCommand ||
+      !api.setUndoPoint
+    )
+      throw new Error("GeoGebra cannot restore Orphaned Source safely.");
+    try {
+      const label = String(api.evalCommandGetLabels('" "') ?? "").split(",")[0];
+      if (!label || api.getObjectType?.(label) !== "text")
+        throw new Error("GeoGebra did not create a new text target.");
+      api.evalCommand(`${label}=${result.expression}`);
+      if (
+        api.getObjectType?.(label) !== "text" ||
+        !api.getCommandString?.(label, false)
       )
-      .map(([id, document]) => ({ id, ...document }));
+        throw new Error("GeoGebra did not retain the restored definition.");
+      const updated: ManagedDocument = {
+        ...document,
+        targetLabel: label,
+        source: restoredSource,
+        simplify: restoredSimplify,
+        compiledFingerprint: await this.fingerprint(label),
+      };
+      metadata.envelope.documents[id] = updated;
+      this.writeMetadata(metadata.label, metadata.envelope);
+      api.setUndoPoint();
+      await this.reconcileMetadata();
+      return { id, ...updated };
+    } catch (error) {
+      api.setXML(snapshot);
+      throw error;
+    }
+  }
+
+  async reconcileMetadata(allowRecovery = true): Promise<void> {
+    const api = this.readyApi();
+    const metadata = this.metadata();
+    const metadataValue = metadata.label
+      ? String(api.getValueString?.(metadata.label) ?? "")
+      : "";
+    if (!allowRecovery) {
+      if (metadataValue !== this.recoveryMetadataValue) {
+        this.recoveredLabels.clear();
+        this.recoveryCandidates.clear();
+        this.recoveryMetadataValue = metadataValue;
+      } else {
+        for (const [id, label] of this.recoveredLabels)
+          if (api.getObjectType?.(label) !== "text")
+            this.recoveredLabels.delete(id);
+      }
+      return;
+    }
+    this.recoveredLabels.clear();
+    this.recoveryCandidates.clear();
+    this.recoveryMetadataValue = metadataValue;
+    const documents = Object.entries(metadata.envelope.documents);
+    const reserved = new Set(
+      documents
+        .filter(
+          ([, document]) =>
+            api.getObjectType?.(document.targetLabel) === "text",
+        )
+        .map(([, document]) => document.targetLabel),
+    );
+    const candidates = (api.getAllObjectNames?.() ?? []).filter(
+      (label) =>
+        label !== metadata.label &&
+        api.getObjectType?.(label) === "text" &&
+        !reserved.has(label),
+    );
+    const fingerprints = new Map<string, string>();
+    await Promise.all(
+      candidates.map(async (label) =>
+        fingerprints.set(label, await this.fingerprint(label)),
+      ),
+    );
+    const matchesById = new Map(
+      documents
+        .filter(
+          ([, document]) =>
+            api.getObjectType?.(document.targetLabel) !== "text",
+        )
+        .map(
+          ([id, document]) =>
+            [
+              id,
+              candidates.filter(
+                (label) =>
+                  fingerprints.get(label) === document.compiledFingerprint,
+              ),
+            ] as const,
+        ),
+    );
+    for (const [id, matches] of matchesById) {
+      if (
+        matches.length === 1 &&
+        [...matchesById.values()].filter((other) => other.includes(matches[0]!))
+          .length === 1
+      )
+        this.recoveredLabels.set(id, matches[0]!);
+      else if (matches.length) this.recoveryCandidates.set(id, matches);
+    }
   }
 
   getUnmanagedTextSnapshot(label: string): string {
@@ -659,7 +898,12 @@ export class GeoGebraAdapter {
       );
     const api = this.readyApi();
     const metadata = this.metadata();
-    const document = metadata.envelope.documents[id];
+    const storedDocument = metadata.envelope.documents[id];
+    const recovered = this.getManagedTexts().find((text) => text.id === id);
+    const document =
+      storedDocument && recovered
+        ? { ...storedDocument, targetLabel: recovered.targetLabel }
+        : storedDocument;
     if (!document || api.getObjectType?.(document.targetLabel) !== "text")
       throw new ApplyFailure(
         "APPLY_TARGET_MISSING",
@@ -872,6 +1116,7 @@ export class GeoGebraAdapter {
     const api = this.readyApi();
     if (!api.setBase64) throw new Error("GeoGebra import is unavailable.");
     await new Promise<void>((resolve) => api.setBase64!(base64, resolve));
+    await this.reconcileMetadata();
   }
 
   resize(): void {
