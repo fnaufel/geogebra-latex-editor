@@ -160,6 +160,8 @@ it("keeps Applied Source intact when GeoGebra rejects a new definition", async (
     getObjectType: () => "text",
     getValueString: (label: string) =>
       label === "gglatexEditorMetadataV1" ? encoded : "old",
+    getCaption: () => "",
+    setCaption: () => {},
     getCommandString: () => 'LaTeX("old")',
     getXML: (label?: string) => (label ? presentation : "<construction/>"),
     setXML: () => {
@@ -170,6 +172,7 @@ it("keeps Applied Source intact when GeoGebra rejects a new definition", async (
       commands.push(command);
       return false;
     },
+    setUndoPoint: () => {},
   };
   vi.stubGlobal(
     "GGBApplet",
@@ -194,7 +197,10 @@ it("keeps Applied Source intact when GeoGebra rejects a new definition", async (
       true,
       'FormulaText(Simplify("new"))',
     ),
-  ).rejects.toThrow("Compiled Definition");
+  ).rejects.toMatchObject({
+    code: "APPLY_ROLLED_BACK",
+    reason: "APPLY_GEOGEBRA_REJECTED",
+  });
   expect(adapter.getManagedTexts()[0]?.source).toBe("old");
   expect(commands).toHaveLength(1);
   corruptOnRestore = true;

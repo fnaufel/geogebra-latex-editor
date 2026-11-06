@@ -221,3 +221,75 @@ it("does not insert the first event of a batched multiple selection", async () =
   expect(workspace.insertionMode).toBe(true);
   expect(workspace.interactionMessage).toMatch(/exactly one/);
 });
+
+it("resynchronizes Applied Source after history without replacing a Diverged Draft", async () => {
+  vi.useFakeTimers();
+  let applied: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "initial",
+    simplify: true,
+    compiledFingerprint: "initial",
+  };
+  let emit: (event: ConstructionEvent) => void = () => {};
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => [],
+    createManagedText: async () => applied,
+    applyManagedText: async () => applied,
+    importBase64: async () => {},
+    getManagedTexts: () => [applied],
+    exportBase64: async () => "file",
+    onEvent: (listener) => {
+      emit = listener;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  workspace.setSource("my draft");
+  applied = { ...applied, source: "after undo", compiledFingerprint: "undo" };
+  emit({ kind: "undo" });
+  await vi.runAllTimersAsync();
+  expect(workspace.currentSource).toBe("my draft");
+  expect(workspace.target?.source).toBe("after undo");
+  expect(workspace.diverged).toBe(true);
+  workspace.discardDraft();
+  expect(workspace.currentSource).toBe("after undo");
+  expect(workspace.diverged).toBe(false);
+  applied = { ...applied, source: "after redo", compiledFingerprint: "redo" };
+  emit({ kind: "redo" });
+  await vi.runAllTimersAsync();
+  expect(workspace.currentSource).toBe("after redo");
+});
+
+it("retains Draft Source when compilation or adapter Apply fails", async () => {
+  const applied: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "old",
+    simplify: true,
+    compiledFingerprint: "old",
+  };
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => [],
+    createManagedText: async () => applied,
+    applyManagedText: async () => {
+      throw new Error("Metadata verification failed.");
+    },
+    importBase64: async () => {},
+    getManagedTexts: () => [applied],
+    exportBase64: async () => "file",
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  workspace.setSource("@missing@");
+  await expect(workspace.apply()).rejects.toThrow("Authoring Source errors");
+  expect(workspace.currentSource).toBe("@missing@");
+  workspace.setSource("new draft");
+  await expect(workspace.apply()).rejects.toThrow(
+    "Metadata verification failed.",
+  );
+  expect(workspace.currentSource).toBe("new draft");
+  expect(workspace.target?.source).toBe("old");
+  expect(workspace.hasDraft).toBe(true);
+});

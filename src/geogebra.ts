@@ -56,12 +56,14 @@ interface AppletApi {
   evalCommandGetLabels?(command: string): string;
   exists?(label: string): boolean;
   getValueString?(label: string): string;
+  getCaption?(label: string, substitutePlaceholders: boolean): string;
   getCommandString?(label: string, localized?: boolean): string;
   getViewProperties?(view: number): string;
   setCoords?(label: string, x: number, y: number): void;
   setVisible?(label: string, visible: boolean): void;
   setAuxiliary?(label: string, auxiliary: boolean): void;
   setFixed?(label: string, fixed: boolean, selectionAllowed: boolean): void;
+  setCaption?(label: string, caption: string): void;
   getXML?(label?: string): string;
   setXML?(xml: string): void;
   setUndoPoint?(): void;
@@ -79,6 +81,54 @@ interface AppletApi {
 
 export interface ManagedText extends ManagedDocument {
   id: string;
+}
+
+export type ApplyFailureCode =
+  | "APPLY_TARGET_MISSING"
+  | "APPLY_SNAPSHOT_UNAVAILABLE"
+  | "APPLY_GEOGEBRA_REJECTED"
+  | "APPLY_POSTCONDITION_FAILED"
+  | "APPLY_METADATA_FAILED"
+  | "APPLY_MUTATION_FAILED"
+  | "APPLY_COMPILER_REJECTED"
+  | "APPLY_ROLLED_BACK"
+  | "APPLY_ROLLBACK_FAILED";
+
+export class ApplyFailure extends Error {
+  constructor(
+    readonly code: ApplyFailureCode,
+    message: string,
+    readonly reason?: ApplyFailureCode,
+    cause?: unknown,
+  ) {
+    super(message, { cause });
+    this.name = "ApplyFailure";
+  }
+}
+
+function snapshotPresentation(
+  api: AppletApi,
+  label: string,
+  description: string,
+): () => boolean {
+  const xml = api.getXML?.(label);
+  const index = xml?.indexOf("<element") ?? -1;
+  if (index < 0)
+    throw new ApplyFailure(
+      "APPLY_SNAPSHOT_UNAVAILABLE",
+      `GeoGebra cannot snapshot the ${description} presentation.`,
+    );
+  const element = xml!.slice(index);
+  const matches = () => {
+    const current = api.getXML?.(label);
+    return !!current && current.slice(current.indexOf("<element")) === element;
+  };
+  if (!matches())
+    throw new ApplyFailure(
+      "APPLY_SNAPSHOT_UNAVAILABLE",
+      `GeoGebra cannot snapshot the ${description} presentation.`,
+    );
+  return matches;
 }
 
 interface AppletEmbed {
@@ -142,6 +192,8 @@ export class GeoGebraAdapter {
   private generation = 0;
   private readonly listeners = new Set<(event: ConstructionEvent) => void>();
   private readonly selectedLabels = new Set<string>();
+  private applyHalted = false;
+  private failedApplySnapshot: string | null = null;
 
   constructor(
     element: HTMLElement,
@@ -155,6 +207,10 @@ export class GeoGebraAdapter {
 
   get state(): AppletState {
     return this.currentState;
+  }
+
+  get hasRecoverableApplySnapshot(): boolean {
+    return this.failedApplySnapshot !== null;
   }
 
   onEvent(listener: (event: ConstructionEvent) => void): () => void {
@@ -216,6 +272,8 @@ export class GeoGebraAdapter {
 
   async start(): Promise<void> {
     const generation = ++this.generation;
+    this.applyHalted = false;
+    this.failedApplySnapshot = null;
     this.api?.remove?.();
     this.api = undefined;
     this.selectedLabels.clear();
@@ -449,31 +507,75 @@ export class GeoGebraAdapter {
     simplify: boolean,
     expression: string,
   ): Promise<ManagedText> {
+    if (this.applyHalted)
+      throw new ApplyFailure(
+        "APPLY_ROLLBACK_FAILED",
+        "Apply is disabled after a failed rollback. Reload the construction before trying again.",
+      );
     const api = this.readyApi();
     const metadata = this.metadata();
     const document = metadata.envelope.documents[id];
     if (!document || api.getObjectType?.(document.targetLabel) !== "text")
-      throw new Error("Editing Target no longer exists.");
+      throw new ApplyFailure(
+        "APPLY_TARGET_MISSING",
+        "Editing Target no longer exists.",
+      );
+    if (
+      !api.evalCommand ||
+      !api.getCommandString ||
+      !api.getValueString ||
+      !api.getCaption ||
+      !api.setCaption ||
+      !api.setUndoPoint
+    )
+      throw new ApplyFailure(
+        "APPLY_SNAPSHOT_UNAVAILABLE",
+        "GeoGebra cannot verify Apply and record its undo point.",
+      );
     const snapshot = api.getXML?.();
     if (!snapshot || !api.setXML || !metadata.label)
-      throw new Error("GeoGebra cannot snapshot the Applied Source state.");
-    const presentation = api.getXML?.(document.targetLabel);
-    const presentationElement = presentation?.includes("<element")
-      ? presentation.slice(presentation.indexOf("<element"))
-      : undefined;
-    const presentationMatches = () => {
-      const current = api.getXML?.(document.targetLabel);
-      return (
-        !!presentationElement &&
-        !!current &&
-        current.slice(current.indexOf("<element")) === presentationElement
+      throw new ApplyFailure(
+        "APPLY_SNAPSHOT_UNAVAILABLE",
+        "GeoGebra cannot snapshot the Applied Source state.",
       );
+    const selectedBefore = [...this.selectedLabels];
+    const selectionMatches = () =>
+      selectedBefore.length === this.selectedLabels.size &&
+      selectedBefore.every((label) => this.selectedLabels.has(label));
+    const restoreSelection = () => {
+      if (!selectionMatches())
+        api.evalCommand!(`SelectObjects(${selectedBefore.join(",")})`);
+      if (!selectionMatches())
+        throw new ApplyFailure(
+          "APPLY_POSTCONDITION_FAILED",
+          "GeoGebra did not restore the selection.",
+        );
     };
-    if (!presentationMatches())
-      throw new Error(
-        "GeoGebra cannot snapshot the Editing Target presentation.",
-      );
+    const presentationXmlMatches = snapshotPresentation(
+      api,
+      document.targetLabel,
+      "Editing Target",
+    );
+    const previousCaption = api.getCaption(document.targetLabel, false);
+    const presentationMatches = () =>
+      presentationXmlMatches() &&
+      api.getCaption?.(document.targetLabel, false) === previousCaption;
+    const restoreCaption = () => {
+      if (api.getCaption?.(document.targetLabel, false) !== previousCaption)
+        api.setCaption?.(document.targetLabel, previousCaption);
+      if (!presentationMatches())
+        throw new ApplyFailure(
+          "APPLY_POSTCONDITION_FAILED",
+          "GeoGebra changed the Editing Target presentation.",
+        );
+    };
+    const metadataPresentationMatches = snapshotPresentation(
+      api,
+      metadata.label,
+      "Authoring Source metadata",
+    );
     const previousCommand = api.getCommandString?.(document.targetLabel, false);
+    const previousValue = api.getValueString?.(document.targetLabel);
     const previousMetadata = String(api.getValueString?.(metadata.label) ?? "");
     const previousExpression = compileSource(document.source, {
       simplify: document.simplify,
@@ -484,15 +586,35 @@ export class GeoGebraAdapter {
       // Restore the snapshot so the final target/metadata write is one operation.
       api.evalCommand?.(`${document.targetLabel}=${expression}`);
       if (api.getObjectType?.(document.targetLabel) !== "text")
-        throw new Error("GeoGebra did not retain the Editing Target.");
+        throw new ApplyFailure(
+          "APPLY_GEOGEBRA_REJECTED",
+          "GeoGebra did not retain the Editing Target.",
+        );
+      restoreCaption();
       const stagedCommand = api.getCommandString?.(document.targetLabel, false);
+      const stagedValue = api.getValueString?.(document.targetLabel);
       if (
         !stagedCommand ||
         (stagedCommand === previousCommand && expression !== previousExpression)
       )
-        throw new Error("GeoGebra rejected the Compiled Definition.");
+        throw new ApplyFailure(
+          "APPLY_GEOGEBRA_REJECTED",
+          "GeoGebra rejected the Compiled Definition.",
+        );
       if (!presentationMatches())
-        throw new Error("GeoGebra changed the Editing Target presentation.");
+        throw new ApplyFailure(
+          "APPLY_POSTCONDITION_FAILED",
+          "GeoGebra changed the Editing Target presentation.",
+        );
+      if (
+        String(api.getValueString?.(metadata.label) ?? "") !==
+          previousMetadata ||
+        !metadataPresentationMatches()
+      )
+        throw new ApplyFailure(
+          "APPLY_METADATA_FAILED",
+          "GeoGebra changed Authoring Source metadata while staging.",
+        );
       const updated: ManagedDocument = {
         targetLabel: document.targetLabel,
         source,
@@ -502,42 +624,96 @@ export class GeoGebraAdapter {
       metadata.envelope.documents[id] = updated;
       const encoded = encodeMetadata(metadata.envelope);
       api.setXML(snapshot);
+      restoreCaption();
       if (
         api.getCommandString?.(document.targetLabel, false) !==
           previousCommand ||
+        api.getValueString?.(document.targetLabel) !== previousValue ||
         String(api.getValueString?.(metadata.label) ?? "") !==
           previousMetadata ||
-        !presentationMatches()
+        !presentationMatches() ||
+        !metadataPresentationMatches()
       )
-        throw new Error("GeoGebra did not restore the pre-Apply state.");
+        throw new ApplyFailure(
+          "APPLY_POSTCONDITION_FAILED",
+          "GeoGebra did not restore the pre-Apply state.",
+        );
       api.evalCommand?.(
         `${document.targetLabel}=${expression}\n${metadata.label}="${encoded}"`,
       );
+      restoreCaption();
       if (
         api.getObjectType?.(document.targetLabel) !== "text" ||
-        api.getCommandString?.(document.targetLabel, false) !== stagedCommand
+        api.getCommandString?.(document.targetLabel, false) !== stagedCommand ||
+        api.getValueString?.(document.targetLabel) !== stagedValue
       )
-        throw new Error("GeoGebra did not retain the Compiled Definition.");
+        throw new ApplyFailure(
+          "APPLY_POSTCONDITION_FAILED",
+          "GeoGebra did not retain the Compiled Definition.",
+        );
       if (String(api.getValueString?.(metadata.label) ?? "") !== encoded)
-        throw new Error("Metadata verification failed.");
-      api.setVisible?.(metadata.label, false);
-      api.setAuxiliary?.(metadata.label, true);
-      api.setFixed?.(metadata.label, true, false);
+        throw new ApplyFailure(
+          "APPLY_METADATA_FAILED",
+          "Metadata verification failed.",
+        );
+      const observedMetadata = decodeMetadata(
+        String(api.getValueString?.(metadata.label) ?? ""),
+      );
+      if (
+        api.getObjectType?.(metadata.label) !== "text" ||
+        !observedMetadata ||
+        encodeMetadata(observedMetadata) !== encoded ||
+        !metadataPresentationMatches()
+      )
+        throw new ApplyFailure(
+          "APPLY_METADATA_FAILED",
+          "Metadata verification failed.",
+        );
       if (!presentationMatches())
-        throw new Error("GeoGebra changed the Editing Target presentation.");
-      api.setUndoPoint?.();
+        throw new ApplyFailure(
+          "APPLY_POSTCONDITION_FAILED",
+          "GeoGebra changed the Editing Target presentation.",
+        );
+      restoreSelection();
+      api.setUndoPoint();
+      this.failedApplySnapshot = null;
       return { id, ...updated };
     } catch (error) {
-      api.setXML(snapshot);
-      if (
-        api.getCommandString?.(document.targetLabel, false) !==
-          previousCommand ||
-        String(api.getValueString?.(metadata.label) ?? "") !==
-          previousMetadata ||
-        !presentationMatches()
-      )
-        throw new Error("Apply rollback failed.", { cause: error });
-      throw error;
+      const reason =
+        error instanceof ApplyFailure ? error.code : "APPLY_MUTATION_FAILED";
+      try {
+        api.setXML(snapshot);
+        restoreCaption();
+        restoreSelection();
+        if (
+          api.getCommandString?.(document.targetLabel, false) !==
+            previousCommand ||
+          api.getValueString?.(document.targetLabel) !== previousValue ||
+          String(api.getValueString?.(metadata.label) ?? "") !==
+            previousMetadata ||
+          !presentationMatches() ||
+          !metadataPresentationMatches()
+        )
+          throw new Error(
+            "Rollback postconditions did not match the snapshot.",
+            { cause: error },
+          );
+      } catch (rollbackError) {
+        this.applyHalted = true;
+        this.failedApplySnapshot = snapshot;
+        throw new ApplyFailure(
+          "APPLY_ROLLBACK_FAILED",
+          "Apply rollback failed. Draft Source and the pre-Apply snapshot remain in this tab.",
+          reason,
+          rollbackError,
+        );
+      }
+      throw new ApplyFailure(
+        "APPLY_ROLLED_BACK",
+        "Apply failed; the previous construction state was restored and Draft Source was retained.",
+        reason,
+        error,
+      );
     }
   }
 

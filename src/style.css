@@ -227,6 +227,12 @@ button:hover {
   flex-wrap: wrap;
   gap: 0.4rem;
 }
+#applied-source {
+  max-height: 8rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 #selection-state,
 #interaction-state {
   min-height: 1.2em;

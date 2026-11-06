@@ -1,5 +1,9 @@
 import { compileSource, type CompileResult, type SymbolInfo } from "./compiler";
-import type { ConstructionEvent, ManagedText } from "./geogebra";
+import {
+  ApplyFailure,
+  type ConstructionEvent,
+  type ManagedText,
+} from "./geogebra";
 
 export interface WorkspaceAdapter {
   getSymbols(): SymbolInfo[];
@@ -28,6 +32,11 @@ export class AuthoringWorkspace {
     string,
     { source: string; simplify: boolean }
   >();
+  private readonly draftBaselines = new Map<
+    string,
+    Pick<ManagedText, "source" | "simplify" | "compiledFingerprint">
+  >();
+  private resyncTimer: ReturnType<typeof setTimeout> | undefined;
   private insertionRange: { from: number; to: number } | null = null;
   private insertionQueued = false;
   private insertionGeneration = 0;
@@ -155,8 +164,34 @@ export class AuthoringWorkspace {
       event.kind === "redo"
     ) {
       this.symbols = this.adapter?.getSymbols() ?? this.symbols;
-      this.schedule();
+      if (this.resyncTimer) clearTimeout(this.resyncTimer);
+      this.resyncTimer = setTimeout(() => {
+        this.resyncTimer = undefined;
+        this.resynchronize();
+      }, 0);
     }
+  }
+
+  private resynchronize(): void {
+    const current = this.editingTarget;
+    const applied = this.adapter
+      ?.getManagedTexts()
+      .find((text) => text.id === current?.id);
+    if (current && applied) {
+      const dirty = this.hasDraft;
+      this.editingTarget = applied;
+      if (!dirty) {
+        this.source = applied.source;
+        this.simplify = applied.simplify;
+        this.drafts.set(applied.id, {
+          source: applied.source,
+          simplify: applied.simplify,
+        });
+        this.draftBaselines.delete(applied.id);
+      }
+    }
+    this.symbols = this.adapter?.getSymbols() ?? this.symbols;
+    this.validateNow();
   }
 
   get target(): ManagedText | null {
@@ -177,6 +212,26 @@ export class AuthoringWorkspace {
       (this.source !== this.editingTarget.source ||
         this.simplify !== this.editingTarget.simplify)
     );
+  }
+
+  get diverged(): boolean {
+    if (!this.editingTarget || !this.hasDraft) return false;
+    const baseline = this.draftBaselines.get(this.editingTarget.id);
+    return (
+      baseline !== undefined &&
+      (baseline.source !== this.editingTarget.source ||
+        baseline.simplify !== this.editingTarget.simplify ||
+        baseline.compiledFingerprint !== this.editingTarget.compiledFingerprint)
+    );
+  }
+
+  discardDraft(): void {
+    if (!this.editingTarget) return;
+    this.source = this.editingTarget.source;
+    this.simplify = this.editingTarget.simplify;
+    this.drafts.delete(this.editingTarget.id);
+    this.draftBaselines.delete(this.editingTarget.id);
+    this.validateNow();
   }
 
   get hasAnyDraft(): boolean {
@@ -221,7 +276,10 @@ export class AuthoringWorkspace {
     this.symbols = this.adapter.getSymbols();
     const result = this.validateNow();
     if (!result.expression)
-      throw new Error("Correct the Authoring Source errors before Apply.");
+      throw new ApplyFailure(
+        "APPLY_COMPILER_REJECTED",
+        "Correct the Authoring Source errors before Apply.",
+      );
     const target = await this.adapter.applyManagedText(
       this.editingTarget.id,
       this.source,
@@ -233,6 +291,7 @@ export class AuthoringWorkspace {
       source: target.source,
       simplify: target.simplify,
     });
+    this.draftBaselines.delete(target.id);
     return target;
   }
 
@@ -240,6 +299,7 @@ export class AuthoringWorkspace {
     if (!this.adapter) throw new Error("GeoGebra adapter is unavailable.");
     await this.adapter.importBase64(base64);
     this.drafts.clear();
+    this.draftBaselines.clear();
     this.editingTarget = null;
     this.insertionRange = null;
     const target = this.adapter.getManagedTexts()[0] ?? null;
@@ -260,7 +320,17 @@ export class AuthoringWorkspace {
     return this.symbols;
   }
 
+  private rememberDraftBaseline(): void {
+    if (this.editingTarget && !this.hasDraft)
+      this.draftBaselines.set(this.editingTarget.id, {
+        source: this.editingTarget.source,
+        simplify: this.editingTarget.simplify,
+        compiledFingerprint: this.editingTarget.compiledFingerprint,
+      });
+  }
+
   setSource(source: string): void {
+    this.rememberDraftBaseline();
     this.source = source;
     if (this.editingTarget)
       this.drafts.set(this.editingTarget.id, {
@@ -271,6 +341,7 @@ export class AuthoringWorkspace {
   }
 
   setSimplify(simplify: boolean): void {
+    this.rememberDraftBaseline();
     this.simplify = simplify;
     if (this.editingTarget)
       this.drafts.set(this.editingTarget.id, { source: this.source, simplify });
@@ -295,6 +366,7 @@ export class AuthoringWorkspace {
 
   dispose(): void {
     if (this.timer) clearTimeout(this.timer);
+    if (this.resyncTimer) clearTimeout(this.resyncTimer);
     this.unsubscribe?.();
   }
 

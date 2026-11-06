@@ -5,7 +5,7 @@ import {
   type CompletionResult,
 } from "@codemirror/autocomplete";
 import { setDiagnostics } from "@codemirror/lint";
-import { EditorState } from "@codemirror/state";
+import { EditorState, Transaction } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
@@ -26,6 +26,7 @@ import type { GeoGebraAdapter, ManagedText } from "./geogebra";
 export interface AuthoringUiState {
   target: ManagedText | null;
   hasDraft: boolean;
+  diverged: boolean;
   canApply: boolean;
   canEditSelection: boolean;
   selectionMessage: string;
@@ -151,6 +152,7 @@ export function mountAuthoringEditor(
   hasDraft: () => boolean;
   hasAnyDraft: () => boolean;
   editSelectedText: () => boolean;
+  discardDraft: () => void;
   startInsertion: () => void;
   cancelInsertion: () => void;
 } {
@@ -162,6 +164,7 @@ export function mountAuthoringEditor(
     onState({
       target: workspace.target,
       hasDraft: workspace.hasDraft,
+      diverged: workspace.diverged,
       canApply,
       canEditSelection: workspace.canEditSelection,
       selectionMessage: workspace.selectionMessage,
@@ -169,6 +172,22 @@ export function mountAuthoringEditor(
       interactionMessage: workspace.interactionMessage,
     });
   const render = (result: CompileResult) => {
+    if (
+      workspace.target?.id === shownId &&
+      view.state.doc.toString() !== workspace.currentSource
+    ) {
+      replacing = true;
+      view.dispatch({
+        changes: {
+          from: 0,
+          to: view.state.doc.length,
+          insert: workspace.currentSource,
+        },
+        annotations: Transaction.addToHistory.of(false),
+      });
+      replacing = false;
+    }
+    simplifyInput.checked = workspace.currentSimplify;
     compiledHost.textContent =
       result.expression ?? "No definition while errors remain.";
     copyButton.disabled = result.expression === null;
@@ -299,6 +318,7 @@ export function mountAuthoringEditor(
       if (pinned) showTarget();
       return pinned;
     },
+    discardDraft: () => workspace.discardDraft(),
     startInsertion: () => {
       const { from, to } = view.state.selection.main;
       workspace.startInsertion(from, to);
