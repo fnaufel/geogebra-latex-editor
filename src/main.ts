@@ -21,6 +21,7 @@ root.innerHTML = `
       <button id="open-file" type="button" disabled>Open .ggb</button>
       <input id="file-input" type="file" accept=".ggb,application/vnd.geogebra.file" hidden>
       <button id="download-file" type="button" disabled>Download .ggb</button>
+      <button id="download-original-metadata" type="button" hidden>Download original metadata</button>
       <span id="filename">construction.ggb</span>
     </div>
   </header>
@@ -107,6 +108,9 @@ const newManagedText = required<HTMLButtonElement>("#new-managed-text");
 const openFile = required<HTMLButtonElement>("#open-file");
 const fileInput = required<HTMLInputElement>("#file-input");
 const downloadFile = required<HTMLButtonElement>("#download-file");
+const downloadOriginalMetadata = required<HTMLButtonElement>(
+  "#download-original-metadata",
+);
 const filename = required<HTMLElement>("#filename");
 const targetLabel = required<HTMLElement>("#target-label");
 const targetState = required<HTMLElement>("#target-state");
@@ -135,6 +139,7 @@ function renderAppletState(state: AppletState): void {
   newManagedText.disabled = !ready;
   openFile.disabled = !ready;
   downloadFile.disabled = !ready;
+  downloadOriginalMetadata.hidden = !adapter.recoverableOlderMetadataBytes;
   recoverFailedApplyButton.disabled = !ready;
   notice.hidden = state.kind === "ready";
   retry.hidden =
@@ -325,6 +330,7 @@ fileInput.addEventListener("change", () => {
     for (const byte of bytes) binary += String.fromCharCode(byte);
     authoring.clearActionError();
     await authoring.open(btoa(binary));
+    downloadOriginalMetadata.hidden = !adapter.recoverableOlderMetadataBytes;
     filename.textContent = file.name.replace(/\.ggb$/i, "") + "-edited.ggb";
     refreshSymbols();
   })()
@@ -352,8 +358,20 @@ downloadFile.addEventListener("click", () => {
     link.href = url;
     link.download = filename.textContent || "construction.ggb";
     link.click();
+    adapter.noteDownloadDispatched();
+    downloadOriginalMetadata.hidden = !adapter.recoverableOlderMetadataBytes;
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
   })().catch(reportActionError);
+});
+downloadOriginalMetadata.addEventListener("click", () => {
+  const original = adapter.recoverableOlderMetadataBytes;
+  if (!original) return;
+  const url = URL.createObjectURL(new Blob([original], { type: "text/plain" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "original-authoring-metadata.base64url.txt";
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 });
 retry.addEventListener("click", () => void adapter.retry());
 new ResizeObserver(() => adapter.resize()).observe(

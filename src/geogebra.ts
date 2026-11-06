@@ -7,6 +7,7 @@ import {
   decodeMetadata,
   emptyMetadata,
   encodeMetadata,
+  inspectMetadata,
   METADATA_LABEL,
   METADATA_PREFIX,
   type ManagedDocument,
@@ -17,6 +18,7 @@ export const GEOGEBRA_VERSION = "5.4.920.0";
 const CODEBASE = `https://www.geogebra.org/apps/${GEOGEBRA_VERSION}/web3d`;
 const DEPLOY_SCRIPT = "https://www.geogebra.org/apps/deployggb.js";
 const LOAD_TIMEOUT_MS = 30_000;
+const OLDER_METADATA_RECOVERY_KEY = "gglatex-editor:older-metadata";
 
 export type AppletState =
   | { kind: "idle" }
@@ -210,6 +212,9 @@ export class GeoGebraAdapter {
   private readonly ambiguousExactIds = new Set<string>();
   private historyReconcile = false;
   private renameQueue: Promise<void> = Promise.resolve();
+  private metadataDiagnostic = "";
+  private olderMetadataBytes: string | null = null;
+  private olderMetadataSeenInConstruction = false;
 
   constructor(
     element: HTMLElement,
@@ -219,6 +224,13 @@ export class GeoGebraAdapter {
     this.element = element;
     this.notify = notify;
     this.loadScript = loadScript;
+    try {
+      this.olderMetadataBytes = sessionStorage.getItem(
+        OLDER_METADATA_RECOVERY_KEY,
+      );
+    } catch {
+      // The current tab can still retain the original bytes in memory.
+    }
   }
 
   get state(): AppletState {
@@ -231,6 +243,26 @@ export class GeoGebraAdapter {
 
   get recoverableApplySnapshot(): string | null {
     return this.failedApplySnapshot;
+  }
+
+  get recoverableOlderMetadataBytes(): string | null {
+    return this.olderMetadataBytes;
+  }
+
+  private clearOlderMetadataRecovery(): void {
+    this.olderMetadataBytes = null;
+    try {
+      sessionStorage.removeItem(OLDER_METADATA_RECOVERY_KEY);
+    } catch {
+      // Storage can be disabled independently of the construction.
+    }
+  }
+
+  noteDownloadDispatched(): void {
+    if (!this.olderMetadataSeenInConstruction) return;
+    const metadata = this.metadata();
+    if (!metadata.label || metadata.olderBytes || metadata.problem) return;
+    this.clearOlderMetadataRecovery();
   }
 
   restoreApplySnapshot(snapshot: string): void {
@@ -303,6 +335,7 @@ export class GeoGebraAdapter {
     });
     api.registerClearListener?.(() => {
       this.selectedLabels.clear();
+      this.olderMetadataSeenInConstruction = false;
       this.emit({ kind: "clear" });
       this.selectionChanged();
     });
@@ -335,6 +368,8 @@ export class GeoGebraAdapter {
     this.deletedManagedIds.clear();
     this.ambiguousExactIds.clear();
     this.historyReconcile = false;
+    this.metadataDiagnostic = "";
+    this.olderMetadataSeenInConstruction = false;
     this.element.replaceChildren();
     this.changeState({ kind: "loading" });
 
@@ -445,8 +480,21 @@ export class GeoGebraAdapter {
     return this.api;
   }
 
-  private metadata(): { label: string | null; envelope: MetadataEnvelope } {
+  private metadata(): {
+    label: string | null;
+    envelope: MetadataEnvelope;
+    problem: "" | "newer" | "ambiguous" | "malformed" | "missing";
+    malformed: boolean;
+    olderBytes?: string;
+  } {
     const api = this.readyApi();
+    const candidates: Array<{
+      label: string;
+      envelope: MetadataEnvelope;
+      olderBytes?: string;
+    }> = [];
+    let newer = false;
+    let malformed = false;
     for (const label of api.getAllObjectNames?.() ?? []) {
       if (
         !label.startsWith(METADATA_PREFIX) ||
@@ -454,10 +502,38 @@ export class GeoGebraAdapter {
       )
         continue;
       const value = String(api.getValueString?.(label) ?? "");
-      const envelope = decodeMetadata(value);
-      if (envelope) return { label, envelope };
+      const inspected = inspectMetadata(value);
+      if (inspected.kind === "current" || inspected.kind === "older")
+        candidates.push({
+          label,
+          envelope: inspected.envelope,
+          ...(inspected.kind === "older" ? { olderBytes: value } : {}),
+        });
+      else if (inspected.kind === "newer") newer = true;
+      else if (inspected.kind === "malformed") malformed = true;
     }
-    return { label: null, envelope: emptyMetadata() };
+    if (newer)
+      return {
+        label: null,
+        envelope: emptyMetadata(),
+        problem: "newer",
+        malformed,
+      };
+    if (candidates.length > 1)
+      return {
+        label: null,
+        envelope: emptyMetadata(),
+        problem: "ambiguous",
+        malformed,
+      };
+    if (candidates.length === 1)
+      return { ...candidates[0]!, problem: "", malformed };
+    return {
+      label: null,
+      envelope: emptyMetadata(),
+      problem: malformed ? "malformed" : "missing",
+      malformed,
+    };
   }
 
   private async handleRename(oldLabel: string, label: string): Promise<void> {
@@ -507,39 +583,6 @@ export class GeoGebraAdapter {
         throw new Error("Rename metadata rollback failed.", { cause: error });
       throw error;
     }
-  }
-
-  private hasNewerMetadata(): boolean {
-    const api = this.readyApi();
-    for (const label of api.getAllObjectNames?.() ?? []) {
-      if (
-        !label.startsWith(METADATA_PREFIX) ||
-        api.getObjectType?.(label) !== "text"
-      )
-        continue;
-      const value = String(api.getValueString?.(label) ?? "");
-      if (!/^[A-Za-z0-9_-]+={0,2}$/.test(value)) continue;
-      try {
-        const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
-        const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-        const parsed: unknown = JSON.parse(
-          new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-        );
-        if (!parsed || typeof parsed !== "object") continue;
-        const record = parsed as Record<string, unknown>;
-        if (
-          record.application === "geogebra-latex-editor" &&
-          ((typeof record.schemaVersion === "number" &&
-            record.schemaVersion > 1) ||
-            (typeof record.languageVersion === "number" &&
-              record.languageVersion > 1))
-        )
-          return true;
-      } catch {
-        // Other prefix collisions are not owned metadata.
-      }
-    }
-    return false;
   }
 
   getManagedTexts(): ManagedText[] {
@@ -679,6 +722,41 @@ export class GeoGebraAdapter {
   async reconcileMetadata(allowRecovery = true): Promise<void> {
     const api = this.readyApi();
     const metadata = this.metadata();
+    if (metadata.olderBytes) this.olderMetadataSeenInConstruction = true;
+    if (
+      metadata.olderBytes &&
+      this.olderMetadataBytes !== metadata.olderBytes
+    ) {
+      this.olderMetadataBytes = metadata.olderBytes;
+      try {
+        sessionStorage.setItem(
+          OLDER_METADATA_RECOVERY_KEY,
+          metadata.olderBytes,
+        );
+      } catch {
+        // Preserve the original in this adapter when storage is unavailable.
+      }
+    }
+    const primaryDiagnostic =
+      metadata.problem === "newer"
+        ? "This construction contains newer Authoring Source metadata; it is preserved without writes."
+        : metadata.problem === "ambiguous"
+          ? "Authoring Source metadata is ambiguous: multiple valid carriers were found."
+          : metadata.problem === "malformed"
+            ? "Authoring Source metadata is malformed; the original carrier is preserved."
+            : metadata.problem === "missing" &&
+                (api.getAllObjectNames?.() ?? []).some(
+                  (label) => api.getObjectType?.(label) === "text",
+                )
+              ? "Authoring Source metadata is missing; text objects remain unmanaged."
+              : "";
+    const diagnostic =
+      metadata.malformed && metadata.problem !== "malformed"
+        ? `${primaryDiagnostic} A malformed metadata candidate was also preserved.`.trim()
+        : primaryDiagnostic;
+    if (diagnostic && diagnostic !== this.metadataDiagnostic)
+      this.emit({ kind: "metadata-error", message: diagnostic });
+    this.metadataDiagnostic = diagnostic;
     const metadataValue = metadata.label
       ? String(api.getValueString?.(metadata.label) ?? "")
       : "";
@@ -793,11 +871,13 @@ export class GeoGebraAdapter {
     expectedRenderedLatex: string,
   ): Promise<ManagedText> {
     const api = this.readyApi();
-    if (this.hasNewerMetadata())
-      throw new Error(
-        "Cannot adopt while this construction contains newer Authoring Source metadata.",
-      );
     const metadata = this.metadata();
+    if (metadata.problem === "newer" || metadata.problem === "ambiguous")
+      throw new Error(
+        metadata.problem === "newer"
+          ? "Cannot adopt while this construction contains newer Authoring Source metadata."
+          : "Cannot adopt while Authoring Source metadata is ambiguous.",
+      );
     if (
       api.getObjectType?.(label) !== "text" ||
       this.getManagedTexts().some((text) => text.targetLabel === label)
@@ -881,16 +961,33 @@ export class GeoGebraAdapter {
   private metadataLabel(existing: string | null): string {
     if (existing) return existing;
     const api = this.readyApi();
-    if (!api.exists?.(METADATA_LABEL)) return METADATA_LABEL;
+    const problem = this.metadata().problem;
+    if (problem === "newer" || problem === "ambiguous")
+      throw new Error(
+        `Authoring Source metadata is ${problem}; writes are disabled.`,
+      );
+    if (!api.getAllObjectNames)
+      throw new Error("GeoGebra cannot check metadata label collisions.");
+    const occupied = new Set(api.getAllObjectNames());
+    if (!occupied.has(METADATA_LABEL)) return METADATA_LABEL;
     for (let suffix = 1; suffix < 10000; suffix++) {
       const label = `${METADATA_PREFIX}_${suffix}`;
-      if (!api.exists?.(label)) return label;
+      if (!occupied.has(label)) return label;
     }
     throw new Error("No metadata label is available.");
   }
 
   private writeMetadata(label: string, envelope: MetadataEnvelope): void {
     const api = this.readyApi();
+    const metadata = this.metadata();
+    if (metadata.problem === "newer" || metadata.problem === "ambiguous")
+      throw new Error(
+        `Authoring Source metadata is ${metadata.problem}; writes are disabled.`,
+      );
+    if (!api.getAllObjectNames)
+      throw new Error("GeoGebra cannot check metadata label collisions.");
+    if (api.getAllObjectNames().includes(label) && metadata.label !== label)
+      throw new Error("The metadata label belongs to another object.");
     const encoded = encodeMetadata(envelope);
     api.evalCommand?.(`${label}="${encoded}"`);
     if (api.getObjectType?.(label) !== "text")
@@ -913,6 +1010,8 @@ export class GeoGebraAdapter {
 
   async createManagedText(): Promise<ManagedText> {
     const api = this.readyApi();
+    const metadata = this.metadata();
+    const metadataLabel = this.metadataLabel(metadata.label);
     const snapshot = api.getXML?.();
     try {
       const label = String(api.evalCommandGetLabels?.('" "') ?? "").split(
@@ -951,7 +1050,6 @@ export class GeoGebraAdapter {
         view.xMin! + (view.width! * view.invXscale!) / 2,
         view.yMin! + (view.height! * view.invYscale!) / 2,
       );
-      const metadata = this.metadata();
       const document: ManagedDocument = {
         targetLabel: label,
         source: "",
@@ -960,7 +1058,7 @@ export class GeoGebraAdapter {
       };
       const id = crypto.randomUUID();
       metadata.envelope.documents[id] = document;
-      this.writeMetadata(this.metadataLabel(metadata.label), metadata.envelope);
+      this.writeMetadata(metadataLabel, metadata.envelope);
       api.setUndoPoint?.();
       return { id, ...document };
     } catch (error) {
@@ -1200,6 +1298,7 @@ export class GeoGebraAdapter {
     const api = this.readyApi();
     if (!api.setBase64) throw new Error("GeoGebra import is unavailable.");
     await new Promise<void>((resolve) => api.setBase64!(base64, resolve));
+    this.olderMetadataSeenInConstruction = false;
     await this.reconcileMetadata();
   }
 
