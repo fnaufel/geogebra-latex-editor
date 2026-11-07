@@ -4,6 +4,188 @@ import { emptyMetadata, encodeMetadata } from "../../src/metadata";
 
 afterEach(() => vi.unstubAllGlobals());
 
+it("stages a candidate before touching the visible construction", async () => {
+  let injection = 0;
+  let visibleImports = 0;
+  vi.stubGlobal(
+    "GGBApplet",
+    class {
+      constructor(private params: Record<string, unknown>) {}
+      setHTML5Codebase() {}
+      inject() {
+        const staged = ++injection > 1;
+        const api = {
+          getVersion: () => GEOGEBRA_VERSION,
+          setWidth: () => {},
+          setHeight: () => {},
+          getXML: () => "<geogebra>visible construction</geogebra>",
+          setBase64: (_base64: string, done: () => void) => {
+            if (staged) throw new Error("Stage rejected candidate.");
+            visibleImports++;
+            done();
+          },
+        };
+        (this.params.appletOnLoad as (api: unknown) => void)(api);
+      }
+    },
+  );
+  const adapter = new GeoGebraAdapter(
+    document.createElement("div"),
+    () => {},
+    async () => {},
+  );
+  await adapter.start();
+  const candidate =
+    "UEsDBBQAAAAIACRtZ13RMFWBDwAAABUAAAAMAAAAZ2VvZ2VicmEueG1ss0lPzU9PTSpKtLPRhzMBUEsBAhQAFAAAAAgAJG1nXdEwVYEPAAAAFQAAAAwAAAAAAAAAAAAAAAAAAAAAAGdlb2dlYnJhLnhtbFBLBQYAAAAAAQABADoAAAA5AAAAAAA=";
+  await expect(adapter.importBase64(candidate)).rejects.toThrow(
+    "Stage rejected candidate.",
+  );
+  expect(visibleImports).toBe(0);
+  expect(adapter.getConstructionState()).toBe(
+    "<geogebra>visible construction</geogebra>",
+  );
+});
+
+it("rejects a staged import that silently leaves candidate objects unloaded", async () => {
+  let visibleImports = 0;
+  vi.stubGlobal(
+    "GGBApplet",
+    class {
+      constructor(private params: Record<string, unknown>) {}
+      setHTML5Codebase() {}
+      inject() {
+        const api = {
+          getVersion: () => GEOGEBRA_VERSION,
+          setWidth: () => {},
+          setHeight: () => {},
+          getXML: () => "<geogebra><construction/></geogebra>",
+          getAllObjectNames: () => [],
+          setBase64: (_base64: string, done: () => void) => {
+            visibleImports++;
+            done();
+          },
+        };
+        (this.params.appletOnLoad as (api: unknown) => void)(api);
+      }
+    },
+  );
+  const adapter = new GeoGebraAdapter(
+    document.createElement("div"),
+    () => {},
+    async () => {},
+  );
+  await adapter.start();
+  const candidate =
+    "UEsDBBQAAAAIAOttZ104XyLuQQAAAFYAAAAMAAAAZ2VvZ2VicmEueG1ss0lPzU9PTSpKtLNJzs8rLikqTS7JzM+zs0nNSc1NzStRKKksSLVVKkmtKFFSyElMSs2BcAyV9O1s9FG16MPNAgBQSwECFAAUAAAACADrbWddOF8i7kEAAABWAAAADAAAAAAAAAAAAAAAAAAAAAAAZ2VvZ2VicmEueG1sUEsFBgAAAAABAAEAOgAAAGsAAAAAAA==";
+  await expect(adapter.importBase64(candidate)).rejects.toThrow(
+    "did not load every object",
+  );
+  expect(visibleImports).toBe(1);
+  expect(adapter.getConstructionState()).toBe(
+    "<geogebra><construction/></geogebra>",
+  );
+});
+
+it("promotes a validated stage without calling import on the visible applet", async () => {
+  let injection = 0;
+  let visibleImports = 0;
+  vi.stubGlobal(
+    "GGBApplet",
+    class {
+      constructor(private params: Record<string, unknown>) {}
+      setHTML5Codebase() {}
+      inject() {
+        const stage = ++injection > 1;
+        const api = {
+          getVersion: () => GEOGEBRA_VERSION,
+          setWidth: () => {},
+          setHeight: () => {},
+          getXML: () =>
+            stage
+              ? '<geogebra><construction><element type="text" label="text1"/></construction></geogebra>'
+              : "<geogebra><construction/></geogebra>",
+          getAllObjectNames: () => (stage ? ["text1"] : []),
+          getBase64: (done: (value: string) => void) => done("original"),
+          setBase64: (_base64: string, done: () => void) => {
+            if (!stage) visibleImports++;
+            done();
+          },
+        };
+        (this.params.appletOnLoad as (api: unknown) => void)(api);
+      }
+    },
+  );
+  const adapter = new GeoGebraAdapter(
+    document.createElement("div"),
+    () => {},
+    async () => {},
+  );
+  await adapter.start();
+  const candidate =
+    "UEsDBBQAAAAIAOttZ104XyLuQQAAAFYAAAAMAAAAZ2VvZ2VicmEueG1ss0lPzU9PTSpKtLNJzs8rLikqTS7JzM+zs0nNSc1NzStRKKksSLVVKkmtKFFSyElMSs2BcAyV9O1s9FG16MPNAgBQSwECFAAUAAAACADrbWddOF8i7kEAAABWAAAADAAAAAAAAAAAAAAAAAAAAAAAZ2VvZ2VicmEueG1sUEsFBgAAAAABAAEAOgAAAGsAAAAAAA==";
+  await adapter.importBase64(candidate);
+  expect(visibleImports).toBe(0);
+  expect(adapter.getConstructionState()).toBe(
+    '<geogebra><construction><element type="text" label="text1"/></construction></geogebra>',
+  );
+  adapter.element.remove();
+});
+
+it("leaves older-metadata recovery storage unchanged when staged Open is canceled", async () => {
+  const key = "gglatex-editor:older-metadata";
+  const previous = sessionStorage.getItem(key);
+  sessionStorage.setItem(key, "previous-recovery");
+  const older = Buffer.from(
+    JSON.stringify({
+      application: "geogebra-latex-editor",
+      schemaVersion: 0,
+      documents: {},
+    }),
+  ).toString("base64url");
+  let injection = 0;
+  vi.stubGlobal(
+    "GGBApplet",
+    class {
+      constructor(private params: Record<string, unknown>) {}
+      setHTML5Codebase() {}
+      inject() {
+        const stage = ++injection > 1;
+        const api = {
+          getVersion: () => GEOGEBRA_VERSION,
+          setWidth: () => {},
+          setHeight: () => {},
+          getXML: () =>
+            stage
+              ? '<geogebra><construction><element type="text" label="gglatexEditorMetadataV1"/></construction></geogebra>'
+              : "<geogebra><construction/></geogebra>",
+          getAllObjectNames: () => (stage ? ["gglatexEditorMetadataV1"] : []),
+          getObjectType: () => "text",
+          getValueString: () => older,
+          setBase64: (_base64: string, done: () => void) => done(),
+        };
+        (this.params.appletOnLoad as (api: unknown) => void)(api);
+      }
+    },
+  );
+  try {
+    const adapter = new GeoGebraAdapter(
+      document.createElement("div"),
+      () => {},
+      async () => {},
+    );
+    await adapter.start();
+    const candidate =
+      "UEsDBBQAAAAIABNwZ11cJpADUwAAAGgAAAAMAAAAZ2VvZ2VicmEueG1sVcyxCoAgFAXQXxF/QNrVrbG1/akXEUzDblB/X1PQeoZjM3pGGOJt7O3gOCNLb96iYkOj4r3DaeKiVlUCqtM5V3lhToV9LKAkoayTNt6af2K+/QFQSwECFAAUAAAACAATcGddXCaQA1MAAABoAAAADAAAAAAAAAAAAAAAAAAAAAAAZ2VvZ2VicmEueG1sUEsFBgAAAAABAAEAOgAAAH0AAAAAAA==";
+    await expect(adapter.importBase64(candidate, () => false)).rejects.toThrow(
+      "workspace changed while Open was staging",
+    );
+    expect(sessionStorage.getItem(key)).toBe("previous-recovery");
+  } finally {
+    if (previous === null) sessionStorage.removeItem(key);
+    else sessionStorage.setItem(key, previous);
+  }
+});
+
 describe("GeoGebra applet lifecycle", () => {
   it("waits for appletOnLoad before reporting ready and configures the host-owned controls", async () => {
     let onLoad:

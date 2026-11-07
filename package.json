@@ -25,7 +25,8 @@
     "@codemirror/lint": "6.9.7",
     "@codemirror/state": "6.7.6",
     "@codemirror/view": "6.43.15",
-    "codemirror": "6.0.2"
+    "codemirror": "6.0.2",
+    "fflate": "0.8.2"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

@@ -3,6 +3,7 @@ import {
   rewriteGlobalReferences,
   type SymbolInfo,
 } from "./compiler";
+import { strFromU8, unzipSync } from "fflate";
 import {
   decodeMetadata,
   emptyMetadata,
@@ -76,6 +77,7 @@ interface AppletApi {
   setUndoPoint?(): void;
   getBase64?(callback: (base64: string) => void): void;
   setBase64?(base64: string, callback: () => void): void;
+  newConstruction?(): void;
   registerAddListener?(listener: (label: string) => void): void;
   registerUpdateListener?(listener: (label: string) => void): void;
   registerRemoveListener?(listener: (label: string) => void): void;
@@ -130,9 +132,17 @@ function snapshotPresentation(
       `GeoGebra cannot snapshot the ${description} presentation.`,
     );
   const element = xml!.slice(index);
+  const comparable = (value: string) =>
+    value
+      .replace(/\s*<isLaTeX val="true"\/>/g, "")
+      .replace(/\s*<font serif="false" sizeM="1" size="0" style="0"\/>/g, "");
   const matches = () => {
     const current = api.getXML?.(label);
-    return !!current && current.slice(current.indexOf("<element")) === element;
+    return (
+      !!current &&
+      comparable(current.slice(current.indexOf("<element"))) ===
+        comparable(element)
+    );
   };
   if (!matches())
     throw new ApplyFailure(
@@ -195,7 +205,7 @@ function loadDeployScript(): Promise<void> {
 }
 
 export class GeoGebraAdapter {
-  readonly element: HTMLElement;
+  element: HTMLElement;
   private readonly notify: (state: AppletState) => void;
   private readonly loadScript: () => Promise<void>;
   private currentState: AppletState = { kind: "idle" };
@@ -215,11 +225,13 @@ export class GeoGebraAdapter {
   private metadataDiagnostic = "";
   private olderMetadataBytes: string | null = null;
   private olderMetadataSeenInConstruction = false;
+  private muteEvents = false;
 
   constructor(
     element: HTMLElement,
     notify: (state: AppletState) => void,
     loadScript = loadDeployScript,
+    private readonly listen = true,
   ) {
     this.element = element;
     this.notify = notify;
@@ -282,6 +294,7 @@ export class GeoGebraAdapter {
   }
 
   private emit(event: ConstructionEvent): void {
+    if (this.muteEvents) return;
     for (const listener of this.listeners) listener(event);
   }
 
@@ -296,14 +309,17 @@ export class GeoGebraAdapter {
   }
 
   private registerListeners(api: AppletApi): void {
-    api.registerAddListener?.((label) =>
-      this.emit({ kind: "object", change: "add", label }),
-    );
-    api.registerUpdateListener?.((label) =>
-      this.emit({ kind: "object", change: "update", label }),
-    );
+    api.registerAddListener?.((label) => {
+      if (api === this.api) this.emit({ kind: "object", change: "add", label });
+    });
+    api.registerUpdateListener?.((label) => {
+      if (api === this.api)
+        this.emit({ kind: "object", change: "update", label });
+    });
     api.registerRemoveListener?.((label) => {
+      if (api !== this.api) return;
       queueMicrotask(() => {
+        if (api !== this.api) return;
         if (api.getObjectType?.(label) === "text") return;
         for (const [id, document] of Object.entries(
           this.metadata().envelope.documents,
@@ -315,14 +331,21 @@ export class GeoGebraAdapter {
       this.selectionChanged();
     });
     api.registerRenameListener?.((oldLabel, label) => {
+      if (api !== this.api) return;
       if (this.selectedLabels.delete(oldLabel)) this.selectedLabels.add(label);
       if (Object.keys(this.metadata().envelope.documents).length === 0)
         this.emit({ kind: "rename", oldLabel, label });
       else
         this.renameQueue = this.renameQueue
-          .then(() => this.handleRename(oldLabel, label))
-          .then(() => this.emit({ kind: "rename", oldLabel, label }))
+          .then(() => {
+            if (api === this.api) return this.handleRename(oldLabel, label);
+          })
+          .then(() => {
+            if (api === this.api)
+              this.emit({ kind: "rename", oldLabel, label });
+          })
           .catch((error: unknown) => {
+            if (api !== this.api) return;
             this.emit({
               kind: "metadata-error",
               message:
@@ -334,12 +357,14 @@ export class GeoGebraAdapter {
       this.selectionChanged();
     });
     api.registerClearListener?.(() => {
+      if (api !== this.api) return;
       this.selectedLabels.clear();
       this.olderMetadataSeenInConstruction = false;
       this.emit({ kind: "clear" });
       this.selectionChanged();
     });
     api.registerClientListener?.((raw) => {
+      if (api !== this.api) return;
       const event = clientEvent(raw);
       if (!event) return;
       if (event.type === "select" && event.target) {
@@ -415,7 +440,7 @@ export class GeoGebraAdapter {
                     return;
                   }
                   this.api = api;
-                  this.registerListeners(api);
+                  if (this.listen) this.registerListeners(api);
                   this.resize();
                   finish({ kind: "ready", version: actual });
                 } catch (error) {
@@ -728,13 +753,15 @@ export class GeoGebraAdapter {
       this.olderMetadataBytes !== metadata.olderBytes
     ) {
       this.olderMetadataBytes = metadata.olderBytes;
-      try {
-        sessionStorage.setItem(
-          OLDER_METADATA_RECOVERY_KEY,
-          metadata.olderBytes,
-        );
-      } catch {
-        // Preserve the original in this adapter when storage is unavailable.
+      if (this.listen) {
+        try {
+          sessionStorage.setItem(
+            OLDER_METADATA_RECOVERY_KEY,
+            metadata.olderBytes,
+          );
+        } catch {
+          // Preserve the original in this adapter when storage is unavailable.
+        }
       }
     }
     const primaryDiagnostic =
@@ -1294,12 +1321,206 @@ export class GeoGebraAdapter {
     });
   }
 
-  async importBase64(base64: string): Promise<void> {
+  getConstructionState(): string {
+    return this.readyApi().getXML?.() ?? "";
+  }
+
+  async newConstruction(): Promise<void> {
+    const api = this.readyApi();
+    if (!api.newConstruction || !api.getAllObjectNames)
+      throw new Error("GeoGebra New is unavailable.");
+    const previous = await this.exportBase64();
+    this.muteEvents = true;
+    try {
+      api.newConstruction();
+      if (api.getAllObjectNames().length !== 0)
+        throw new Error("GeoGebra did not clear the construction.");
+      this.selectedLabels.clear();
+      this.recoveredLabels.clear();
+      this.recoveryCandidates.clear();
+      this.deletedManagedIds.clear();
+      this.ambiguousExactIds.clear();
+      this.olderMetadataSeenInConstruction = false;
+    } catch (error) {
+      try {
+        await this.loadBase64(previous);
+        await this.reconcileMetadata();
+      } catch {
+        throw new Error(
+          "New failed and the previous construction could not be restored.",
+          { cause: error },
+        );
+      }
+      throw error;
+    } finally {
+      this.muteEvents = false;
+    }
+    try {
+      this.selectionChanged();
+    } catch {
+      /* The workspace clears selection after New. */
+    }
+  }
+
+  private validateArchive(base64: string): Set<string> {
+    let files: ReturnType<typeof unzipSync>;
+    try {
+      const binary = atob(base64);
+      const bytes = Uint8Array.from(binary, (character) =>
+        character.charCodeAt(0),
+      );
+      files = unzipSync(bytes, {
+        filter: (file) => file.name === "geogebra.xml",
+      });
+    } catch {
+      throw new Error("The selected file is not a readable .ggb archive.");
+    }
+    const xml = files["geogebra.xml"];
+    const parsed =
+      xml && new DOMParser().parseFromString(strFromU8(xml), "application/xml");
+    if (
+      !parsed ||
+      parsed.documentElement.tagName !== "geogebra" ||
+      parsed.querySelector("parsererror")
+    )
+      throw new Error("The selected file has no valid GeoGebra construction.");
+    return new Set(
+      [...parsed.getElementsByTagName("element")]
+        .map((element) => element.getAttribute("label"))
+        .filter((label): label is string => !!label),
+    );
+  }
+
+  private async loadBase64(base64: string): Promise<void> {
     const api = this.readyApi();
     if (!api.setBase64) throw new Error("GeoGebra import is unavailable.");
-    await new Promise<void>((resolve) => api.setBase64!(base64, resolve));
-    this.olderMetadataSeenInConstruction = false;
-    await this.reconcileMetadata();
+    const wasMuted = this.muteEvents;
+    this.muteEvents = true;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = window.setTimeout(
+          () => reject(new Error("GeoGebra file import timed out.")),
+          LOAD_TIMEOUT_MS,
+        );
+        try {
+          api.setBase64!(base64, () => {
+            window.clearTimeout(timeout);
+            resolve();
+          });
+        } catch (error) {
+          window.clearTimeout(timeout);
+          reject(error);
+        }
+      });
+    } finally {
+      this.muteEvents = wasMuted;
+    }
+  }
+
+  private transferConstructionState(staged: GeoGebraAdapter): void {
+    this.recoveredLabels = new Map(staged.recoveredLabels);
+    this.recoveryCandidates = new Map(staged.recoveryCandidates);
+    this.recoveryMetadataValue = staged.recoveryMetadataValue;
+    this.deletedManagedIds.clear();
+    for (const id of staged.deletedManagedIds) this.deletedManagedIds.add(id);
+    this.ambiguousExactIds.clear();
+    for (const id of staged.ambiguousExactIds) this.ambiguousExactIds.add(id);
+    this.historyReconcile = staged.historyReconcile;
+    this.metadataDiagnostic = staged.metadataDiagnostic;
+    this.olderMetadataBytes = staged.olderMetadataBytes;
+    this.olderMetadataSeenInConstruction =
+      staged.olderMetadataSeenInConstruction;
+    this.applyHalted = false;
+    this.failedApplySnapshot = null;
+  }
+
+  async importBase64(
+    base64: string,
+    canCommit: () => boolean = () => true,
+  ): Promise<void> {
+    const expectedLabels = this.validateArchive(base64);
+    const before = this.getConstructionState();
+    const stageElement = document.createElement("div");
+    stageElement.style.cssText =
+      "position:fixed;left:-10000px;top:0;width:800px;height:600px;visibility:hidden";
+    document.body.append(stageElement);
+    const staged = new GeoGebraAdapter(
+      stageElement,
+      () => {},
+      this.loadScript,
+      false,
+    );
+    let committed = false;
+    try {
+      await staged.start();
+      if (staged.state.kind !== "ready")
+        throw new Error("The selected file could not be staged in GeoGebra.");
+      await staged.loadBase64(base64);
+      const stagedState = staged.getConstructionState();
+      if (!stagedState.includes("<geogebra"))
+        throw new Error("GeoGebra could not read the selected construction.");
+      const stagedLabels = new Set(staged.api?.getAllObjectNames?.() ?? []);
+      if ([...expectedLabels].some((label) => !stagedLabels.has(label)))
+        throw new Error(
+          "GeoGebra did not load every object in the selected file.",
+        );
+      await staged.reconcileMetadata();
+      await this.renameQueue;
+      if (!canCommit() || this.getConstructionState() !== before)
+        throw new Error(
+          "The workspace changed while Open was staging. Choose the file again.",
+        );
+      const previousElement = this.element;
+      const previousApi = this.readyApi();
+      const nextApi = staged.readyApi();
+      this.registerListeners(nextApi);
+      previousElement.replaceWith(stageElement);
+      stageElement.id = previousElement.id;
+      stageElement.style.cssText = "";
+      this.element = stageElement;
+      this.api = nextApi;
+      this.selectedLabels.clear();
+      this.transferConstructionState(staged);
+      committed = true;
+      try {
+        previousApi.remove?.();
+      } catch {
+        /* The validated applet is already active. */
+      }
+      if (this.olderMetadataSeenInConstruction && this.olderMetadataBytes)
+        try {
+          sessionStorage.setItem(
+            OLDER_METADATA_RECOVERY_KEY,
+            this.olderMetadataBytes,
+          );
+        } catch {
+          /* The original bytes remain available in this adapter. */
+        }
+      try {
+        this.resize();
+      } catch {
+        /* ResizeObserver can retry after promotion. */
+      }
+      try {
+        this.selectionChanged();
+      } catch {
+        /* Workspace Open clears selection itself. */
+      }
+      if (this.metadataDiagnostic)
+        try {
+          this.emit({
+            kind: "metadata-error",
+            message: this.metadataDiagnostic,
+          });
+        } catch {
+          /* Opening the staged construction has already succeeded. */
+        }
+    } finally {
+      if (!committed) {
+        staged.api?.remove?.();
+        stageElement.remove();
+      }
+    }
   }
 
   resize(): void {

@@ -35,6 +35,10 @@ test("offers original metadata after a tab reload and retains it after an unrela
   );
   const constructionDownload = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download .ggb" }).click();
+  await page
+    .getByRole("dialog", { name: "Download construction" })
+    .getByRole("button", { name: "Download .ggb" })
+    .click();
   await constructionDownload;
   await expect(downloadOriginal).toBeVisible();
 });

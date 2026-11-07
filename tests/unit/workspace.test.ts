@@ -8,6 +8,218 @@ import {
 
 afterEach(() => vi.useRealTimers());
 
+it("tracks construction changes separately from unapplied Draft Sources", async () => {
+  let construction = "blank";
+  let listener: (event: ConstructionEvent) => void = () => {};
+  const text: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "A",
+    simplify: true,
+    compiledFingerprint: "old",
+  };
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => [],
+    getUnmanagedTextSnapshot: () => "",
+    adoptUnmanagedText: async () => text,
+    createManagedText: async () => text,
+    applyManagedText: async () => text,
+    importBase64: async () => {},
+    getManagedTexts: () => [text],
+    exportBase64: async () => "file",
+    getConstructionState: () => construction,
+    onEvent: (callback) => {
+      listener = callback;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  workspace.markConstructionClean();
+  await workspace.create();
+  workspace.setSource("draft");
+  expect(workspace.hasAnyDraft).toBe(true);
+  expect(workspace.dirtyConstruction).toBe(false);
+  construction = "changed";
+  listener({ kind: "object", change: "add", label: "a" });
+  expect(workspace.dirtyConstruction).toBe(true);
+  construction = "blank";
+  listener({ kind: "undo" });
+  expect(workspace.dirtyConstruction).toBe(false);
+  expect(workspace.hasAnyDraft).toBe(true);
+});
+
+it("applies valid independent drafts while retaining invalid and divergent drafts", async () => {
+  const texts: ManagedText[] = [
+    {
+      id: "one",
+      targetLabel: "text1",
+      source: "A",
+      simplify: true,
+      compiledFingerprint: "a",
+    },
+    {
+      id: "two",
+      targetLabel: "text2",
+      source: "B",
+      simplify: true,
+      compiledFingerprint: "b",
+    },
+    {
+      id: "three",
+      targetLabel: "text3",
+      source: "C",
+      simplify: true,
+      compiledFingerprint: "c",
+    },
+  ];
+  let listener: (event: ConstructionEvent) => void = () => {};
+  const applied: string[] = [];
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => [],
+    getUnmanagedTextSnapshot: () => "",
+    adoptUnmanagedText: async () => texts[0]!,
+    createManagedText: async () => texts[0]!,
+    applyManagedText: async (id, source, simplify) => {
+      applied.push(id);
+      const index = texts.findIndex((text) => text.id === id);
+      texts[index] = {
+        ...texts[index]!,
+        source,
+        simplify,
+        compiledFingerprint: `new-${id}`,
+      };
+      return texts[index]!;
+    },
+    importBase64: async () => {},
+    getManagedTexts: () => texts,
+    exportBase64: async () => "file",
+    onEvent: (callback) => {
+      listener = callback;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  workspace.setSource("valid");
+  listener({
+    kind: "selection",
+    selected: [{ label: "text2", type: "text", defined: true }],
+  });
+  workspace.editSelectedText();
+  workspace.setSource("@missing@");
+  listener({
+    kind: "selection",
+    selected: [{ label: "text3", type: "text", defined: true }],
+  });
+  workspace.editSelectedText();
+  workspace.setSource("divergent");
+  texts[2] = {
+    ...texts[2]!,
+    source: "external",
+    compiledFingerprint: "changed",
+  };
+  listener({ kind: "redo" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(workspace.draftDetails.map((draft) => draft.kind)).toEqual([
+    "valid",
+    "invalid",
+    "divergent",
+  ]);
+  await workspace.applyAllValidDrafts();
+  expect(applied).toEqual(["one"]);
+  expect(workspace.hasAnyDraft).toBe(true);
+  expect(workspace.draftDetails.map((draft) => draft.kind)).toEqual([
+    "invalid",
+    "divergent",
+  ]);
+});
+
+it("stops Apply all when one target fails and retains that target's Draft Source", async () => {
+  const texts: ManagedText[] = [
+    {
+      id: "one",
+      targetLabel: "text1",
+      source: "A",
+      simplify: true,
+      compiledFingerprint: "a",
+    },
+    {
+      id: "two",
+      targetLabel: "text2",
+      source: "B",
+      simplify: true,
+      compiledFingerprint: "b",
+    },
+  ];
+  let selected: (event: ConstructionEvent) => void = () => {};
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => [],
+    getUnmanagedTextSnapshot: () => "",
+    adoptUnmanagedText: async () => texts[0]!,
+    createManagedText: async () => texts[0]!,
+    applyManagedText: async (id, source) => {
+      if (id === "two") throw new Error("Target write failed.");
+      texts[0] = { ...texts[0]!, source };
+      return texts[0]!;
+    },
+    importBase64: async () => {},
+    getManagedTexts: () => texts,
+    exportBase64: async () => "file",
+    onEvent: (callback) => {
+      selected = callback;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  workspace.setSource("new A");
+  selected({
+    kind: "selection",
+    selected: [{ label: "text2", type: "text", defined: true }],
+  });
+  workspace.editSelectedText();
+  workspace.setSource("new B");
+  await expect(workspace.applyAllValidDrafts()).rejects.toThrow(
+    "Target write failed.",
+  );
+  expect(texts[0]?.source).toBe("new A");
+  expect(texts[1]?.source).toBe("B");
+  expect(workspace.draftDetails).toEqual([
+    { label: "text2", kind: "valid", reason: "Ready to apply." },
+  ]);
+});
+
+it("cancels Open if a Draft Source changes while the candidate is staging", async () => {
+  const text: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "A",
+    simplify: true,
+    compiledFingerprint: "old",
+  };
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => [],
+    getUnmanagedTextSnapshot: () => "",
+    adoptUnmanagedText: async () => text,
+    createManagedText: async () => text,
+    applyManagedText: async () => text,
+    importBase64: async (_base64, canCommit) => {
+      workspace.setSource("Edited during stage");
+      if (!canCommit?.()) throw new Error("Workspace changed during stage.");
+    },
+    getManagedTexts: () => [text],
+    exportBase64: async () => "file",
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.create();
+  await expect(workspace.open("candidate")).rejects.toThrow(
+    "Workspace changed during stage.",
+  );
+  expect(workspace.target?.id).toBe("one");
+  expect(workspace.currentSource).toBe("Edited during stage");
+  expect(workspace.hasAnyDraft).toBe(true);
+});
+
 function fakeWorkspace(texts: ManagedText[]) {
   let listener: (event: ConstructionEvent) => void = () => {};
   const adapter: WorkspaceAdapter = {

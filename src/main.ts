@@ -17,12 +17,14 @@ root.innerHTML = `
     </div>
     <span class="pin">GeoGebra Classic ${GEOGEBRA_VERSION}</span>
     <div class="file-actions">
+      <button id="new-construction" type="button" disabled>New construction</button>
       <button id="new-managed-text" type="button" disabled>New Managed Text</button>
       <button id="open-file" type="button" disabled>Open .ggb</button>
       <input id="file-input" type="file" accept=".ggb,application/vnd.geogebra.file" hidden>
       <button id="download-file" type="button" disabled>Download .ggb</button>
       <button id="download-original-metadata" type="button" hidden>Download original metadata</button>
       <span id="filename">construction.ggb</span>
+      <span id="construction-state" role="status" aria-live="polite">Construction current</span>
     </div>
   </header>
   <main class="workspace" aria-label="Construction and authoring workspace">
@@ -75,6 +77,22 @@ root.innerHTML = `
       </div>
     </section>
   </main>
+  <dialog id="download-dialog" aria-labelledby="download-title">
+    <h2 id="download-title">Download construction</h2>
+    <p>Draft Sources remain local until applied. Downloading the applied construction does not save them in the file.</p>
+    <p>Apply all valid drafts skips invalid and divergent drafts; they remain in this workspace.</p>
+    <div id="download-drafts" role="status"></div>
+    <fieldset id="download-choices">
+      <legend>Download choice</legend>
+      <label><input type="radio" name="download-choice" value="apply"> Apply all valid drafts</label>
+      <label><input type="radio" name="download-choice" value="applied" checked> Download applied construction only</label>
+    </fieldset>
+    <label>Filename <input id="download-name" type="text" required></label>
+    <div class="dialog-actions">
+      <button id="cancel-download" type="button">Cancel</button>
+      <button id="confirm-download" type="button">Download .ggb</button>
+    </div>
+  </dialog>
   <footer class="footer">
     <span>Unofficial · Made with GeoGebra®</span>
     <nav aria-label="Project and GeoGebra information">
@@ -104,6 +122,7 @@ const unmanagedSource = required<HTMLElement>("#unmanaged-source");
 const retainedDraft = required<HTMLElement>("#retained-draft");
 const editorFeedback = required<HTMLElement>("#editor-feedback");
 const simplifyInput = required<HTMLInputElement>("#simplify");
+const newConstruction = required<HTMLButtonElement>("#new-construction");
 const newManagedText = required<HTMLButtonElement>("#new-managed-text");
 const openFile = required<HTMLButtonElement>("#open-file");
 const fileInput = required<HTMLInputElement>("#file-input");
@@ -112,6 +131,12 @@ const downloadOriginalMetadata = required<HTMLButtonElement>(
   "#download-original-metadata",
 );
 const filename = required<HTMLElement>("#filename");
+const constructionState = required<HTMLElement>("#construction-state");
+const downloadDialog = required<HTMLDialogElement>("#download-dialog");
+const downloadDrafts = required<HTMLElement>("#download-drafts");
+const downloadName = required<HTMLInputElement>("#download-name");
+const cancelDownload = required<HTMLButtonElement>("#cancel-download");
+const confirmDownload = required<HTMLButtonElement>("#confirm-download");
 const targetLabel = required<HTMLElement>("#target-label");
 const targetState = required<HTMLElement>("#target-state");
 const selectionState = required<HTMLElement>("#selection-state");
@@ -133,9 +158,11 @@ const appliedSourceLabel = required<HTMLElement>("#applied-source-label");
 const appliedSource = required<HTMLElement>("#applied-source");
 let refreshSymbols = () => {};
 let insertionActive = false;
+let fileOperationBusy = false;
 
 function renderAppletState(state: AppletState): void {
-  const ready = state.kind === "ready";
+  const ready = state.kind === "ready" && !fileOperationBusy;
+  newConstruction.disabled = !ready;
   newManagedText.disabled = !ready;
   openFile.disabled = !ready;
   downloadFile.disabled = !ready;
@@ -180,6 +207,7 @@ const authoring = mountAuthoringEditor(
     canRestoreOrphaned,
     retainedDraftSource,
     hasDraft,
+    dirtyConstruction,
     diverged,
     canApply,
     canEditSelection,
@@ -217,12 +245,18 @@ const authoring = mountAuthoringEditor(
             : recoveryAvailable
               ? "A failed Apply snapshot and Draft Source are available to restore."
               : "No text is open for editing.");
-    applyButton.disabled = !target || !hasDraft || !canApply;
+    applyButton.disabled =
+      fileOperationBusy || !target || !hasDraft || !canApply;
     adoptButton.hidden = !unmanaged;
+    adoptButton.disabled = fileOperationBusy;
     restoreOrphanedButton.hidden = !orphaned;
     restoreOrphanedButton.disabled =
-      !canRestoreOrphaned || !canApply || adapter.state.kind !== "ready";
+      fileOperationBusy ||
+      !canRestoreOrphaned ||
+      !canApply ||
+      adapter.state.kind !== "ready";
     discardOrphanedButton.hidden = !orphaned;
+    discardOrphanedButton.disabled = fileOperationBusy;
     orphanedSources.replaceChildren();
     for (const source of availableOrphans) {
       if (source.id === orphaned?.id) continue;
@@ -239,31 +273,102 @@ const authoring = mountAuthoringEditor(
     retainedDraft.textContent = retainedDraftSource ?? "";
     editorHost.hidden = !!unmanaged;
     editorFeedback.hidden = !!unmanaged;
-    simplifyInput.disabled = !!unmanaged;
+    simplifyInput.disabled = fileOperationBusy || !!unmanaged;
     applyButton.hidden = diverged;
     reapplyButton.hidden = !diverged;
-    reapplyButton.disabled = !canApply;
+    reapplyButton.disabled = fileOperationBusy || !canApply;
     discardDraftButton.hidden = !diverged;
+    discardDraftButton.disabled = fileOperationBusy;
     recoverFailedApplyButton.hidden = !recoveryAvailable;
     appliedSourceLabel.hidden = !diverged;
     appliedSource.hidden = !diverged;
     appliedSource.textContent = diverged ? (target?.source ?? "") : "";
     selectionState.textContent = selectionMessage;
     interactionState.textContent = interactionMessage;
-    editSelected.disabled = !canEditSelection || adapter.state.kind !== "ready";
+    constructionState.textContent = dirtyConstruction
+      ? "Dirty Construction · changes since last open or download"
+      : "Construction current";
+    editSelected.disabled =
+      fileOperationBusy || !canEditSelection || adapter.state.kind !== "ready";
     insertObject.disabled =
-      !target || insertionMode || adapter.state.kind !== "ready";
+      fileOperationBusy ||
+      !target ||
+      insertionMode ||
+      adapter.state.kind !== "ready";
     cancelInsertion.hidden = !insertionMode;
     insertionActive = insertionMode;
   },
 );
 refreshSymbols = authoring.refreshSymbols;
+editorHost.addEventListener(
+  "beforeinput",
+  (event) => {
+    if (fileOperationBusy) event.preventDefault();
+  },
+  true,
+);
+
+function setFileOperationBusy(busy: boolean): void {
+  fileOperationBusy = busy;
+  renderAppletState(adapter.state);
+  confirmDownload.disabled = busy;
+  cancelDownload.disabled = busy;
+  if (busy) {
+    for (const button of [
+      applyButton,
+      reapplyButton,
+      editSelected,
+      adoptButton,
+      restoreOrphanedButton,
+      discardOrphanedButton,
+      discardDraftButton,
+      insertObject,
+    ])
+      button.disabled = true;
+    simplifyInput.disabled = true;
+  } else authoring.refreshSymbols();
+}
 
 function reportActionError(error: unknown): Promise<void> {
   return authoring.reportActionError(error);
 }
 
+function confirmReplacement(action: "New" | "Open"): boolean {
+  if (
+    authoring.hasAnyDraft() &&
+    !window.confirm(
+      `${action} will discard unapplied Draft Sources. Downloading the construction does not save these drafts. Continue?`,
+    )
+  )
+    return false;
+  if (
+    authoring.dirtyConstruction() &&
+    !window.confirm(
+      `${action} will discard Dirty Construction changes since the last open or download. Applying Draft Sources does not download the construction. Continue?`,
+    )
+  )
+    return false;
+  return true;
+}
+
+newConstruction.addEventListener("click", () => {
+  if (fileOperationBusy) return;
+  if (!confirmReplacement("New")) return;
+  setFileOperationBusy(true);
+  void (async () => {
+    try {
+      await authoring.newConstruction();
+      filename.textContent = "construction.ggb";
+      refreshSymbols();
+    } finally {
+      setFileOperationBusy(false);
+      newConstruction.focus();
+    }
+  })().catch(reportActionError);
+});
+
 newManagedText.addEventListener("click", () => {
+  if (fileOperationBusy) return;
   authoring.clearActionError();
   void authoring.create().catch(reportActionError);
 });
@@ -297,6 +402,7 @@ window.addEventListener("keydown", (event) => {
   authoring.cancelInsertion();
 });
 function applyDraft(): void {
+  if (fileOperationBusy) return;
   void authoring.apply().catch(reportActionError);
 }
 applyButton.addEventListener("click", applyDraft);
@@ -315,16 +421,12 @@ recoverFailedApplyButton.addEventListener("click", () => {
 });
 openFile.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", () => {
+  if (fileOperationBusy) return;
   const file = fileInput.files?.[0];
   if (!file) return;
   void (async () => {
-    if (
-      authoring.hasAnyDraft() &&
-      !window.confirm(
-        "Discard unapplied Draft Source and open another construction?",
-      )
-    )
-      return;
+    if (!confirmReplacement("Open")) return;
+    setFileOperationBusy(true);
     const bytes = new Uint8Array(await file.arrayBuffer());
     let binary = "";
     for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -336,18 +438,49 @@ fileInput.addEventListener("change", () => {
   })()
     .catch(reportActionError)
     .finally(() => {
+      setFileOperationBusy(false);
       fileInput.value = "";
     });
 });
 downloadFile.addEventListener("click", () => {
+  if (fileOperationBusy) return;
+  downloadDrafts.replaceChildren();
+  const drafts = authoring.draftDetails();
+  if (drafts.length === 0)
+    downloadDrafts.textContent = "No unapplied Draft Sources.";
+  else {
+    const list = document.createElement("ul");
+    for (const draft of drafts) {
+      const item = document.createElement("li");
+      item.textContent = `${draft.label}: ${draft.kind} Draft Source. ${draft.reason}`;
+      list.append(item);
+    }
+    downloadDrafts.append(list);
+  }
+  const applyChoice = required<HTMLInputElement>(
+    'input[name="download-choice"][value="apply"]',
+  );
+  applyChoice.disabled = drafts.length === 0;
+  required<HTMLInputElement>(
+    'input[name="download-choice"][value="applied"]',
+  ).checked = true;
+  downloadName.value = filename.textContent || "construction.ggb";
+  downloadDialog.showModal();
+});
+cancelDownload.addEventListener("click", () => downloadDialog.close());
+downloadDialog.addEventListener("close", () => downloadFile.focus());
+confirmDownload.addEventListener("click", () => {
+  if (fileOperationBusy) return;
+  downloadName.setCustomValidity(
+    downloadName.value.trim() ? "" : "Enter a filename.",
+  );
+  if (!downloadName.reportValidity()) return;
+  setFileOperationBusy(true);
   void (async () => {
-    if (
-      authoring.hasAnyDraft() &&
-      !window.confirm(
-        "Download Applied State only? Unapplied Draft Source will stay in the editor.",
-      )
-    )
-      return;
+    const choice = required<HTMLInputElement>(
+      'input[name="download-choice"][value="apply"]',
+    );
+    if (choice.checked) await authoring.applyAllValidDrafts();
     const base64 = await authoring.exportBase64();
     const binary = atob(base64);
     const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
@@ -356,12 +489,18 @@ downloadFile.addEventListener("click", () => {
     );
     const link = document.createElement("a");
     link.href = url;
-    link.download = filename.textContent || "construction.ggb";
+    const chosen = downloadName.value.trim();
+    link.download = /\.ggb$/i.test(chosen) ? chosen : `${chosen}.ggb`;
     link.click();
+    filename.textContent = link.download;
     adapter.noteDownloadDispatched();
+    authoring.markConstructionClean();
     downloadOriginalMetadata.hidden = !adapter.recoverableOlderMetadataBytes;
+    downloadDialog.close();
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-  })().catch(reportActionError);
+  })()
+    .catch(reportActionError)
+    .finally(() => setFileOperationBusy(false));
 });
 downloadOriginalMetadata.addEventListener("click", () => {
   const original = adapter.recoverableOlderMetadataBytes;
@@ -433,4 +572,11 @@ splitter.addEventListener("pointercancel", () =>
 narrow.addEventListener("change", updateLayout);
 updateLayout();
 renderAppletState(adapter.state);
-void adapter.start();
+window.addEventListener("beforeunload", (event) => {
+  if (!authoring.hasAnyDraft() && !authoring.dirtyConstruction()) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+void adapter.start().then(() => {
+  if (adapter.state.kind === "ready") authoring.markConstructionClean();
+});

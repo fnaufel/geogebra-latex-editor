@@ -92,6 +92,51 @@ h1 {
   padding: 0.4rem 0.6rem;
   white-space: nowrap;
 }
+#construction-state {
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+#download-dialog {
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  border: 1px solid #8298aa;
+  border-radius: 0.5rem;
+  padding: 1.2rem;
+  color: #1b2632;
+  background: #fff;
+  box-shadow: 0 1rem 3rem #14263b55;
+}
+#download-dialog::backdrop {
+  background: #14263baa;
+}
+#download-dialog h2,
+#download-dialog p,
+#download-dialog fieldset,
+#download-dialog #download-drafts,
+#download-dialog > label {
+  display: block;
+  margin-bottom: 0.8rem;
+}
+#download-dialog fieldset label {
+  display: block;
+  margin: 0.35rem 0;
+}
+#download-dialog #download-drafts ul {
+  margin: 0;
+  padding-left: 1.3rem;
+}
+#download-dialog #download-name {
+  display: block;
+  width: 100%;
+  margin-top: 0.3rem;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
 button:disabled {
   opacity: 0.55;
   cursor: not-allowed;

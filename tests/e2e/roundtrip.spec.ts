@@ -42,6 +42,10 @@ test("creates, applies, downloads, reopens, and continues editing a Managed Text
   );
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download .ggb" }).click();
+  await page
+    .getByRole("dialog", { name: "Download construction" })
+    .getByRole("button", { name: "Download .ggb" })
+    .click();
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe("construction.ggb");
   const file = await download.path();

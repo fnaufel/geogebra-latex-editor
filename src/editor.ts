@@ -32,6 +32,7 @@ export interface AuthoringUiState {
   canRestoreOrphaned: boolean;
   retainedDraftSource: string | null;
   hasDraft: boolean;
+  dirtyConstruction: boolean;
   diverged: boolean;
   canApply: boolean;
   canEditSelection: boolean;
@@ -173,7 +174,16 @@ export function mountAuthoringEditor(
   create: () => Promise<ManagedText>;
   apply: () => Promise<ManagedText>;
   open: (base64: string) => Promise<ManagedText | null>;
+  newConstruction: () => Promise<void>;
   exportBase64: () => Promise<string>;
+  markConstructionClean: () => void;
+  dirtyConstruction: () => boolean;
+  draftDetails: () => {
+    label: string;
+    kind: "valid" | "invalid" | "divergent";
+    reason: string;
+  }[];
+  applyAllValidDrafts: () => Promise<void>;
   hasDraft: () => boolean;
   hasAnyDraft: () => boolean;
   editSelectedText: () => boolean;
@@ -201,6 +211,7 @@ export function mountAuthoringEditor(
       canRestoreOrphaned: workspace.canRestoreOrphaned,
       retainedDraftSource: workspace.retainedDraftSource,
       hasDraft: workspace.hasDraft,
+      dirtyConstruction: workspace.dirtyConstruction,
       diverged: workspace.diverged,
       canApply,
       canEditSelection: workspace.canEditSelection,
@@ -355,7 +366,17 @@ export function mountAuthoringEditor(
       showTarget();
       return target;
     },
+    newConstruction: async () => {
+      await workspace.newConstruction();
+      states.clear();
+      shownId = null;
+      showTarget();
+    },
     exportBase64: () => workspace.exportBase64(),
+    markConstructionClean: () => workspace.markConstructionClean(),
+    dirtyConstruction: () => workspace.dirtyConstruction,
+    draftDetails: () => workspace.draftDetails,
+    applyAllValidDrafts: () => workspace.applyAllValidDrafts(),
     hasDraft: () => workspace.hasDraft,
     hasAnyDraft: () => workspace.hasAnyDraft,
     editSelectedText: () => {

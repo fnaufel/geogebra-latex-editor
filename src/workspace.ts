@@ -32,7 +32,9 @@ export interface WorkspaceAdapter {
     simplify: boolean,
     expression: string,
   ): Promise<ManagedText>;
-  importBase64(base64: string): Promise<void>;
+  importBase64(base64: string, canCommit?: () => boolean): Promise<void>;
+  newConstruction?(): Promise<void>;
+  getConstructionState?(): string;
   getManagedTexts(): ManagedText[];
   getOrphanedTexts?(): OrphanedText[];
   discardOrphanedText?(id: string): Promise<void>;
@@ -87,6 +89,8 @@ export class AuthoringWorkspace {
   private actionErrorMessage: string | null = null;
   private recoveryRecord: FailedApplyRecovery | null = null;
   private readonly recoveryLoad: Promise<void>;
+  private cleanConstructionState: string | null = null;
+  private constructionChanged = false;
 
   constructor(
     private readonly notify: (result: CompileResult) => void,
@@ -431,6 +435,7 @@ export class AuthoringWorkspace {
       event.kind === "undo" ||
       event.kind === "redo"
     ) {
+      this.constructionChanged = true;
       this.symbols = this.adapter?.getSymbols() ?? this.symbols;
       if (this.resyncTimer) clearTimeout(this.resyncTimer);
       this.resyncTimer = setTimeout(() => {
@@ -726,6 +731,128 @@ export class AuthoringWorkspace {
     });
   }
 
+  get dirtyConstruction(): boolean {
+    if (
+      this.cleanConstructionState !== null &&
+      this.adapter?.getConstructionState
+    ) {
+      try {
+        return (
+          this.adapter.getConstructionState() !== this.cleanConstructionState
+        );
+      } catch {
+        return this.constructionChanged;
+      }
+    }
+    return this.constructionChanged;
+  }
+
+  markConstructionClean(): void {
+    this.cleanConstructionState =
+      this.adapter?.getConstructionState?.() ?? null;
+    this.constructionChanged = false;
+    this.notify(this.compiled);
+  }
+
+  private assessDraft(
+    id: string,
+    draft: { source: string; simplify: boolean },
+    text: ManagedText | undefined,
+  ): {
+    kind: "valid" | "invalid" | "divergent";
+    reason: string;
+    expression: string | null;
+  } | null {
+    if (
+      text &&
+      draft.source === text.source &&
+      draft.simplify === text.simplify
+    )
+      return null;
+    if (!text)
+      return {
+        kind: "invalid",
+        reason: "Editing Target is unavailable.",
+        expression: null,
+      };
+    const baseline = this.draftBaselines.get(id);
+    if (
+      baseline &&
+      (baseline.source !== text.source ||
+        baseline.simplify !== text.simplify ||
+        baseline.compiledFingerprint !== text.compiledFingerprint)
+    )
+      return {
+        kind: "divergent",
+        reason: "Applied Source changed since this draft began.",
+        expression: null,
+      };
+    const result = compileSource(draft.source, {
+      simplify: draft.simplify,
+      symbols: this.adapter?.getSymbols() ?? this.symbols,
+    });
+    const error = result.diagnostics.find(
+      (diagnostic) => diagnostic.severity === "error",
+    );
+    return {
+      kind: error ? "invalid" : "valid",
+      reason: error?.message ?? "Ready to apply.",
+      expression: result.expression,
+    };
+  }
+
+  get draftDetails(): {
+    label: string;
+    kind: "valid" | "invalid" | "divergent";
+    reason: string;
+  }[] {
+    const details: {
+      label: string;
+      kind: "valid" | "invalid" | "divergent";
+      reason: string;
+    }[] = [];
+    const applied = new Map(
+      this.adapter?.getManagedTexts().map((text) => [text.id, text]) ?? [],
+    );
+    for (const [id, draft] of this.drafts) {
+      const text = applied.get(id);
+      const assessment = this.assessDraft(id, draft, text);
+      if (assessment)
+        details.push({
+          label: text?.targetLabel ?? id,
+          kind: assessment.kind,
+          reason: assessment.reason,
+        });
+    }
+    return details;
+  }
+
+  async applyAllValidDrafts(): Promise<void> {
+    if (!this.adapter) throw new Error("GeoGebra adapter is unavailable.");
+    for (const [id, draft] of [...this.drafts]) {
+      const text = this.adapter
+        .getManagedTexts()
+        .find((candidate) => candidate.id === id);
+      const assessment = this.assessDraft(id, draft, text);
+      if (!assessment) {
+        this.drafts.delete(id);
+        this.draftBaselines.delete(id);
+        continue;
+      }
+      if (assessment.kind !== "valid" || !assessment.expression) continue;
+      const updated = await this.adapter.applyManagedText(
+        id,
+        draft.source,
+        draft.simplify,
+        assessment.expression,
+      );
+      this.drafts.delete(id);
+      this.draftBaselines.delete(id);
+      if (this.editingTarget?.id === id) this.editingTarget = updated;
+    }
+    this.validateNow();
+  }
+
   private loadTarget(target: ManagedText | null): void {
     this.insertionGeneration++;
     this.insertionRange = null;
@@ -788,7 +915,23 @@ export class AuthoringWorkspace {
 
   async open(base64: string): Promise<ManagedText | null> {
     if (!this.adapter) throw new Error("GeoGebra adapter is unavailable.");
-    await this.adapter.importBase64(base64);
+    const before = JSON.stringify({
+      drafts: [...this.drafts],
+      source: this.source,
+      simplify: this.simplify,
+      target: this.editingTarget?.id,
+    });
+    await this.adapter.importBase64(
+      base64,
+      () =>
+        before ===
+        JSON.stringify({
+          drafts: [...this.drafts],
+          source: this.source,
+          simplify: this.simplify,
+          target: this.editingTarget?.id,
+        }),
+    );
     this.clearActionError();
     this.drafts.clear();
     this.draftBaselines.clear();
@@ -796,10 +939,28 @@ export class AuthoringWorkspace {
     this.retainedOrphans.clear();
     this.editingTarget = null;
     this.orphaned = null;
+    this.selected = [];
     this.insertionRange = null;
     const target = this.adapter.getManagedTexts()[0] ?? null;
     this.loadTarget(target);
+    this.markConstructionClean();
     return target;
+  }
+
+  async newConstruction(): Promise<void> {
+    if (!this.adapter?.newConstruction)
+      throw new Error("GeoGebra New is unavailable.");
+    await this.adapter.newConstruction();
+    this.clearActionError();
+    this.drafts.clear();
+    this.draftBaselines.clear();
+    this.undoneAdoptions.clear();
+    this.retainedOrphans.clear();
+    this.editingTarget = null;
+    this.orphaned = null;
+    this.selected = [];
+    this.loadTarget(null);
+    this.markConstructionClean();
   }
 
   async exportBase64(): Promise<string> {
