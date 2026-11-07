@@ -55,6 +55,27 @@ test("draft editing shows diagnostics and a one-line definition without evaluati
   await editor.fill("@De");
   await editor.press("Control+Space");
   await expect(page.getByRole("option", { name: /Delete/ })).toHaveCount(0);
+  await editor.fill("@si");
+  await editor.press("Control+Space");
+  await expect(
+    page.getByRole("option", { name: "sin", exact: true }),
+  ).toBeVisible();
+  await editor.fill("@ra");
+  await editor.press("Control+Space");
+  await expect(page.getByRole("option", { name: /random/ })).toHaveCount(0);
+  await editor.fill("\\fra");
+  await editor.press("Control+Space");
+  await expect(page.getByRole("option", { name: "\\frac" })).toBeVisible();
+  await editor.fill("@a ");
+  await editor.press("Control+Space");
+  await expect(page.getByRole("option", { name: "FractionText" })).toHaveCount(
+    0,
+  );
+  await editor.fill("@a + Fr");
+  await editor.press("Control+Space");
+  await expect(
+    page.getByRole("option", { name: "FractionText" }),
+  ).toBeVisible();
   await editor.fill('@Text("Fr');
   await editor.press("Control+Space");
   await expect(page.getByRole("option", { name: "FractionText" })).toHaveCount(

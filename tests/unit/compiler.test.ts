@@ -353,6 +353,31 @@ describe("v1 Authoring Source", () => {
     expect(compile("@If(true,{a,b},Intersect(a,b))@").expression).toBeNull();
   });
 
+  it("rejects adjacent values and trailing values after a nested call", () => {
+    for (const source of ["@a b@", "@a 2@", "@FractionText(a)b@", "@(a)(b)@"])
+      expect(compile(source).expression, source).toBeNull();
+  });
+
+  it("does not pass text-producing calls to numeric overloads", () => {
+    for (const source of [
+      "@ScientificText(FractionText(a))@",
+      "@ScientificText(If(true,Text(a),b))@",
+      "@SurdText(Ordinal(a),{b})@",
+    ])
+      expect(
+        compile(source).diagnostics.map((item) => item.code),
+        source,
+      ).toContain("unsupported-overload");
+  });
+
+  it("accepts numeric results when a nested condition compares text", () => {
+    for (const source of [
+      '@ScientificText(If(Text(a)=="2",1,2))@',
+      '@ScientificText(a+If(Text(a)=="2",1,2))@',
+    ])
+      expect(compile(source).expression, source).not.toBeNull();
+  });
+
   it("keeps the documented catalog limited to the twelve approved commands", () => {
     expect(Object.keys(SAFE_COMMANDS)).toEqual([
       "FormulaText",

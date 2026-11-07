@@ -72,6 +72,12 @@ function sourceCompletion(
   const interpolation = opening !== null;
   if (opening !== null) {
     const expression = before.slice(opening + 1);
+    const completed = expression.trimEnd();
+    if (
+      /[\p{L}\p{M}\p{N}_)\]}"]$/u.test(completed) &&
+      (completed.length !== expression.length || /[)\]}"]$/u.test(completed))
+    )
+      return null;
     let quoted = false;
     for (let index = 0; index < expression.length; index++) {
       if (expression[index] !== '"') continue;

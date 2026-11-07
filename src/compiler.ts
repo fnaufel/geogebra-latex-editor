@@ -33,10 +33,12 @@ export interface CommandCatalogEntry {
     localBindings: readonly number[];
   }[];
   result: "single";
+  valueKind: "text" | "value";
 }
 
 const forms = (...arities: number[]): CommandCatalogEntry => ({
   result: "single",
+  valueKind: "text",
   overloads: arities.map((arity) => ({ arity, localBindings: [] })),
 });
 const typedForm = (
@@ -47,6 +49,7 @@ const typedForm = (
 export const SAFE_COMMANDS: Readonly<Record<string, CommandCatalogEntry>> = {
   FormulaText: {
     result: "single",
+    valueKind: "text",
     overloads: [
       typedForm("value"),
       typedForm("value", "boolean"),
@@ -55,18 +58,22 @@ export const SAFE_COMMANDS: Readonly<Record<string, CommandCatalogEntry>> = {
   },
   FractionText: {
     result: "single",
+    valueKind: "text",
     overloads: [typedForm("value"), typedForm("value", "boolean")],
   },
   SurdText: {
     result: "single",
+    valueKind: "text",
     overloads: [typedForm("value"), typedForm("number", "list")],
   },
   ScientificText: {
     result: "single",
+    valueKind: "text",
     overloads: [typedForm("number"), typedForm("number", "number")],
   },
   TableText: {
     result: "single",
+    valueKind: "text",
     overloads: [
       typedForm("list"),
       typedForm("list", "list"),
@@ -81,11 +88,13 @@ export const SAFE_COMMANDS: Readonly<Record<string, CommandCatalogEntry>> = {
   Name: forms(1),
   Text: {
     result: "single",
+    valueKind: "text",
     overloads: [typedForm("value"), typedForm("value", "boolean")],
   },
-  Simplify: forms(1),
+  Simplify: { ...forms(1), valueKind: "value" },
   If: {
     result: "single",
+    valueKind: "value",
     overloads: [
       typedForm("boolean", "value"),
       typedForm("boolean", "value", "value"),
@@ -327,10 +336,29 @@ function checkExpressionSyntax(
     const frame = frames[frames.length - 1];
     if (!token || !frame) continue;
     if (token.kind !== "punctuation") {
+      if (!frame.expectValue)
+        diagnostics.push({
+          code: "missing-operator",
+          severity: "error",
+          message: "Separate values with an operator.",
+          from: token.from,
+          to: token.to,
+        });
       frame.expectValue = false;
       continue;
     }
     if (["(", "[", "{"].includes(token.text)) {
+      if (
+        !frame.expectValue &&
+        !(["(", "["].includes(token.text) && tokens[index - 1]?.kind === "name")
+      )
+        diagnostics.push({
+          code: "missing-operator",
+          severity: "error",
+          message: "Separate values with an operator.",
+          from: token.from,
+          to: token.to,
+        });
       frames.push({
         opener: token,
         expectValue: true,
@@ -497,10 +525,67 @@ function matchesArgumentKind(
   kind: "value" | "boolean" | "list" | "text" | "number",
   tokens: readonly Token[],
   symbols: ReadonlyMap<string, SymbolInfo>,
+  commands: Readonly<Record<string, CommandCatalogEntry>>,
 ): boolean {
   if (kind === "value") return tokens.length > 0;
   if (kind === "boolean") return isBooleanExpression(tokens, symbols);
   const first = tokens[0];
+  const second = tokens[1];
+  const last = tokens.at(-1);
+  if (
+    first?.kind === "name" &&
+    (second?.text === "(" || second?.text === "[") &&
+    last?.text === (second.text === "(" ? ")" : "]")
+  ) {
+    let depth = 0;
+    let wholeCall = true;
+    for (let index = 1; index < tokens.length; index++) {
+      const text = tokens[index]?.text;
+      if (["(", "[", "{"].includes(text ?? "")) depth++;
+      else if ([")", "]", "}"].includes(text ?? "")) depth--;
+      if (depth === 0 && index < tokens.length - 1) wholeCall = false;
+    }
+    if (wholeCall) {
+      const arguments_ = splitArguments(tokens.slice(2, -1));
+      if (first.text === "If")
+        return (
+          arguments_.length >= 2 &&
+          arguments_
+            .slice(1)
+            .every((argument) =>
+              matchesArgumentKind(kind, argument, symbols, commands),
+            )
+        );
+      if (first.text === "Simplify" && arguments_.length === 1)
+        return matchesArgumentKind(
+          kind,
+          arguments_[0] ?? [],
+          symbols,
+          commands,
+        );
+      const command = Object.hasOwn(commands, first.text)
+        ? commands[first.text]
+        : undefined;
+      if (command) return command.valueKind === kind;
+      return (
+        kind === "number" &&
+        (FUNCTIONS.has(first.text) ||
+          symbols.get(first.text)?.type === "function")
+      );
+    }
+  }
+  if (first?.text === "(" && last?.text === ")") {
+    let depth = 0;
+    let wrapped = true;
+    for (let index = 0; index < tokens.length - 1; index++) {
+      const text = tokens[index]?.text;
+      if (text === "(") depth++;
+      else if (text === ")") depth--;
+      if (depth === 0) wrapped = false;
+    }
+    if (wrapped)
+      return matchesArgumentKind(kind, tokens.slice(1, -1), symbols, commands);
+  }
   if (kind === "list")
     return (
       (first?.text === "{" && tokens.at(-1)?.text === "}") ||
@@ -515,20 +600,35 @@ function matchesArgumentKind(
   if (tokens.length === 1)
     return (
       first?.kind === "number" ||
-      CONSTANTS.has(first?.text ?? "") ||
+      (CONSTANTS.has(first?.text ?? "") &&
+        first?.text !== "true" &&
+        first?.text !== "false") ||
       ["number", "numeric"].includes(symbols.get(first?.text ?? "")?.type ?? "")
     );
-  return !tokens.some(
-    (token) =>
-      token.kind === "string" ||
-      token.text === "{" ||
-      token.text === "}" ||
-      token.text === "true" ||
-      token.text === "false" ||
-      (token.kind === "name" &&
-        ["text", "point", "vector", "boolean", "list", "matrix"].includes(
-          symbols.get(token.text)?.type ?? "",
-        )),
+  if (first?.text === "+" || first?.text === "-")
+    return matchesArgumentKind(kind, tokens.slice(1), symbols, commands);
+  if (kind !== "number") return false;
+  const parts: Token[][] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < tokens.length; index++) {
+    const text = tokens[index]?.text;
+    if (["(", "[", "{"].includes(text ?? "")) depth++;
+    else if ([")", "]", "}"].includes(text ?? "")) depth--;
+    else if (
+      depth === 0 &&
+      ["+", "-", "*", "/", "^"].includes(text ?? "") &&
+      index > start
+    ) {
+      parts.push(tokens.slice(start, index));
+      start = index + 1;
+    }
+  }
+  if (!parts.length) return false;
+  parts.push(tokens.slice(start));
+  return parts.every(
+    (part) =>
+      part.length > 0 && matchesArgumentKind(kind, part, symbols, commands),
   );
 }
 
@@ -668,6 +768,7 @@ function validateExpression(
                         kind,
                         arguments_[argumentIndex] ?? [],
                         symbols,
+                        commands,
                       ),
                     )),
               )

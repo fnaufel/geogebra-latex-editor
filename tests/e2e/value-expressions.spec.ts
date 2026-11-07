@@ -68,6 +68,8 @@ test("the pinned applet produces one text value for approved expressions and obj
     "ScientificText(a,5)",
     "TableText({a,b})",
     "TableText({a},{b})",
+    'TableText({a},"v")',
+    "TableText({a},{b},{a})",
     'TableText({a},{b},"v")',
     'VerticalText("a")',
     "Ordinal(a)",
@@ -93,6 +95,7 @@ test("the pinned applet produces one text value for approved expressions and obj
     ...commandExpressions,
     ...functionExpressions,
     "If(a>0,FractionText(b/a),SurdText(a))",
+    'ScientificText(If(Text(a)=="2",1,2))',
   ];
   const definitions = expressions.map((expression, index) => {
     const result = compileSource(`@${expression}@`, {
