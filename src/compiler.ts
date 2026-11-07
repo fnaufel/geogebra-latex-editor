@@ -27,7 +27,9 @@ export interface Reference extends SourceRange {
 export interface CommandCatalogEntry {
   overloads: readonly {
     arity: number;
-    argumentKinds?: readonly ("value" | "boolean")[];
+    argumentKinds?: readonly (
+      "value" | "boolean" | "list" | "text" | "number"
+    )[];
     localBindings: readonly number[];
   }[];
   result: "single";
@@ -37,27 +39,58 @@ const forms = (...arities: number[]): CommandCatalogEntry => ({
   result: "single",
   overloads: arities.map((arity) => ({ arity, localBindings: [] })),
 });
+const typedForm = (
+  ...argumentKinds: ("value" | "boolean" | "list" | "text" | "number")[]
+) => ({ arity: argumentKinds.length, argumentKinds, localBindings: [] });
 
 // Intentionally conservative. These are the single-result forms supported in v1.
 export const SAFE_COMMANDS: Readonly<Record<string, CommandCatalogEntry>> = {
-  FormulaText: forms(1, 2, 3),
-  FractionText: forms(1, 2),
-  SurdText: forms(1, 2),
-  ScientificText: forms(1, 2),
-  TableText: forms(1, 2, 3),
+  FormulaText: {
+    result: "single",
+    overloads: [
+      typedForm("value"),
+      typedForm("value", "boolean"),
+      typedForm("value", "boolean", "boolean"),
+    ],
+  },
+  FractionText: {
+    result: "single",
+    overloads: [typedForm("value"), typedForm("value", "boolean")],
+  },
+  SurdText: {
+    result: "single",
+    overloads: [typedForm("value"), typedForm("number", "list")],
+  },
+  ScientificText: {
+    result: "single",
+    overloads: [typedForm("number"), typedForm("number", "number")],
+  },
+  TableText: {
+    result: "single",
+    overloads: [
+      typedForm("list"),
+      typedForm("list", "list"),
+      typedForm("list", "text"),
+      typedForm("list", "list", "list"),
+      typedForm("list", "list", "text"),
+    ],
+  },
   VerticalText: forms(1),
   Ordinal: forms(1),
   UnicodeToLetter: forms(1),
   Name: forms(1),
   Text: {
     result: "single",
-    overloads: [
-      { arity: 1, localBindings: [] },
-      { arity: 2, argumentKinds: ["value", "boolean"], localBindings: [] },
-    ],
+    overloads: [typedForm("value"), typedForm("value", "boolean")],
   },
   Simplify: forms(1),
-  If: forms(2, 3),
+  If: {
+    result: "single",
+    overloads: [
+      typedForm("boolean", "value"),
+      typedForm("boolean", "value", "value"),
+    ],
+  },
 };
 
 export const PURE_FUNCTIONS = [
@@ -121,7 +154,7 @@ const UNSAFE_COMMANDS = new Set([
   "CopyFreeObject",
   "Intersect",
 ]);
-const CONSTANTS = new Set([
+export const VALUE_CONSTANTS = [
   "x",
   "y",
   "z",
@@ -132,8 +165,18 @@ const CONSTANTS = new Set([
   "ί",
   "i",
   "e",
-]);
+] as const;
+const CONSTANTS = new Set<string>(VALUE_CONSTANTS);
 const FUNCTIONS = new Set<string>(PURE_FUNCTIONS);
+const FUNCTION_ARITIES: Readonly<Record<string, readonly number[]>> = {
+  atan2: [2],
+  gamma: [1, 2],
+  gammaRegularized: [2],
+  beta: [2, 3],
+  betaRegularized: [3],
+  log: [1, 2],
+  round: [1, 2],
+};
 
 export interface CompileOptions {
   simplify: boolean;
@@ -391,6 +434,104 @@ function checkExpressionSyntax(
     });
 }
 
+function splitArguments(tokens: readonly Token[]): Token[][] {
+  const arguments_: Token[][] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < tokens.length; index++) {
+    const text = tokens[index]?.text;
+    if (text === "(" || text === "[" || text === "{") depth++;
+    else if (text === ")" || text === "]" || text === "}") depth--;
+    else if (text === "," && depth === 0) {
+      arguments_.push(tokens.slice(start, index));
+      start = index + 1;
+    }
+  }
+  if (tokens.length) arguments_.push(tokens.slice(start));
+  return arguments_;
+}
+
+function isBooleanExpression(
+  tokens: readonly Token[],
+  symbols: ReadonlyMap<string, SymbolInfo>,
+): boolean {
+  const first = tokens[0];
+  if (tokens.length === 1)
+    return (
+      first?.text === "true" ||
+      first?.text === "false" ||
+      symbols.get(first?.text ?? "")?.type === "boolean"
+    );
+  if (first?.text === "!" && tokens.length > 1)
+    return isBooleanExpression(tokens.slice(1), symbols);
+  if (first?.text === "(" && tokens.at(-1)?.text === ")")
+    return isBooleanExpression(tokens.slice(1, -1), symbols);
+  if (
+    first?.text === "If" &&
+    tokens[1]?.text === "(" &&
+    tokens.at(-1)?.text === ")"
+  ) {
+    const arguments_ = splitArguments(tokens.slice(2, -1));
+    return (
+      arguments_.length >= 2 &&
+      arguments_.every(
+        (argument, index) =>
+          index === 0 || isBooleanExpression(argument, symbols),
+      )
+    );
+  }
+  let depth = 0;
+  for (const token of tokens) {
+    if (["(", "[", "{"].includes(token.text)) depth++;
+    else if ([")", "]", "}"].includes(token.text)) depth--;
+    else if (
+      depth === 0 &&
+      ["==", "=", "!=", "<", ">", "<=", ">=", "&&", "||"].includes(token.text)
+    )
+      return true;
+  }
+  return false;
+}
+
+function matchesArgumentKind(
+  kind: "value" | "boolean" | "list" | "text" | "number",
+  tokens: readonly Token[],
+  symbols: ReadonlyMap<string, SymbolInfo>,
+): boolean {
+  if (kind === "value") return tokens.length > 0;
+  if (kind === "boolean") return isBooleanExpression(tokens, symbols);
+  const first = tokens[0];
+  if (kind === "list")
+    return (
+      (first?.text === "{" && tokens.at(-1)?.text === "}") ||
+      (tokens.length === 1 &&
+        ["list", "matrix"].includes(symbols.get(first?.text ?? "")?.type ?? ""))
+    );
+  if (kind === "text")
+    return (
+      (tokens.length === 1 && first?.kind === "string") ||
+      (tokens.length === 1 && symbols.get(first?.text ?? "")?.type === "text")
+    );
+  if (tokens.length === 1)
+    return (
+      first?.kind === "number" ||
+      CONSTANTS.has(first?.text ?? "") ||
+      ["number", "numeric"].includes(symbols.get(first?.text ?? "")?.type ?? "")
+    );
+  return !tokens.some(
+    (token) =>
+      token.kind === "string" ||
+      token.text === "{" ||
+      token.text === "}" ||
+      token.text === "true" ||
+      token.text === "false" ||
+      (token.kind === "name" &&
+        ["text", "point", "vector", "boolean", "list", "matrix"].includes(
+          symbols.get(token.text)?.type ?? "",
+        )),
+  );
+}
+
 function validateExpression(
   expression: string,
   start: number,
@@ -404,7 +545,8 @@ function validateExpression(
     options.symbols.map((symbol) => [symbol.label, symbol]),
   );
   const commands = options.commands ?? SAFE_COMMANDS;
-  const stack: Array<{ token: Token; index: number; commas: number }> = [];
+  const stack: Array<{ token: Token; index: number; separators: number[] }> =
+    [];
 
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
@@ -422,7 +564,8 @@ function validateExpression(
           });
         else if (
           !Object.hasOwn(commands, token.text) &&
-          !FUNCTIONS.has(token.text)
+          !FUNCTIONS.has(token.text) &&
+          symbols.get(token.text)?.type !== "function"
         )
           diagnostics.push({
             code: "unknown-command",
@@ -431,6 +574,25 @@ function validateExpression(
             from: token.from,
             to: token.to,
           });
+        else if (
+          symbols.get(token.text)?.type === "function" &&
+          !Object.hasOwn(commands, token.text) &&
+          !FUNCTIONS.has(token.text)
+        ) {
+          references.push({
+            label: token.text,
+            from: token.from,
+            to: token.to,
+          });
+          if (!symbols.get(token.text)?.defined)
+            diagnostics.push({
+              code: "undefined-value",
+              severity: "warning",
+              message: `${token.text} is currently undefined.`,
+              from: token.from,
+              to: token.to,
+            });
+        }
       } else if (!CONSTANTS.has(token.text)) {
         const symbol = symbols.get(token.text);
         if (!symbol)
@@ -459,10 +621,10 @@ function validateExpression(
       }
     }
     if (["(", "[", "{"].includes(token.text)) {
-      stack.push({ token, index, commas: 0 });
+      stack.push({ token, index, separators: [] });
     } else if (token.text === ",") {
       const frame = stack[stack.length - 1];
-      if (frame) frame.commas++;
+      if (frame) frame.separators.push(index);
       else
         diagnostics.push({
           code: "unexpected-comma",
@@ -487,13 +649,30 @@ function validateExpression(
         const previous = tokens[frame.index - 1];
         if (
           previous?.kind === "name" &&
-          Object.hasOwn(commands, previous.text)
+          (Object.hasOwn(commands, previous.text) ||
+            FUNCTIONS.has(previous.text))
         ) {
-          const arity = index === frame.index + 1 ? 0 : frame.commas + 1;
-          const overload = commands[previous.text]?.overloads.find(
-            (form) => form.arity === arity,
-          );
-          if (!overload)
+          const arity =
+            index === frame.index + 1 ? 0 : frame.separators.length + 1;
+          const cuts = [frame.index, ...frame.separators, index];
+          const arguments_ = cuts
+            .slice(0, -1)
+            .map((cut, offset) => tokens.slice(cut + 1, cuts[offset + 1]));
+          const supported = Object.hasOwn(commands, previous.text)
+            ? commands[previous.text]?.overloads.some(
+                (form) =>
+                  form.arity === arity &&
+                  (!form.argumentKinds ||
+                    form.argumentKinds.every((kind, argumentIndex) =>
+                      matchesArgumentKind(
+                        kind,
+                        arguments_[argumentIndex] ?? [],
+                        symbols,
+                      ),
+                    )),
+              )
+            : (FUNCTION_ARITIES[previous.text] ?? [1]).includes(arity);
+          if (!supported)
             diagnostics.push({
               code: "unsupported-overload",
               severity: "error",
@@ -501,29 +680,6 @@ function validateExpression(
               from: previous.from,
               to: token.to,
             });
-          else if (overload.argumentKinds?.includes("boolean")) {
-            const separator = tokens.findIndex(
-              (part, partIndex) =>
-                partIndex > frame.index &&
-                partIndex < index &&
-                part.text === ",",
-            );
-            const argument =
-              separator < 0 ? [] : tokens.slice(separator + 1, index);
-            const boolean =
-              argument.length === 1 &&
-              (argument[0]?.text === "true" ||
-                argument[0]?.text === "false" ||
-                symbols.get(argument[0]?.text ?? "")?.type === "boolean");
-            if (!boolean)
-              diagnostics.push({
-                code: "unsupported-overload",
-                severity: "error",
-                message: `${previous.text} requires a boolean second argument.`,
-                from: previous.from,
-                to: token.to,
-              });
-          }
         }
       }
     }
@@ -546,6 +702,22 @@ function literalTerms(text: string): string[] {
     if (index < pieces.length - 1) terms.push("UnicodeToLetter(34)");
   });
   return terms;
+}
+
+function runtimeExpression(expression: string): string {
+  const tokens = lexExpression(expression, 0, []);
+  let compiled = expression;
+  for (let index = tokens.length - 2; index >= 0; index--) {
+    const token = tokens[index];
+    if (
+      token?.kind === "name" &&
+      token.text === "arcos" &&
+      ["(", "["].includes(tokens[index + 1]?.text ?? "")
+    )
+      compiled =
+        compiled.slice(0, token.from) + "acos" + compiled.slice(token.to);
+  }
+  return compiled;
 }
 
 export interface SourceScan {
@@ -641,7 +813,7 @@ export function compileSource(
   const terms = segments.flatMap((segment) =>
     segment.kind === "literal"
       ? literalTerms(segment.text)
-      : [`FormulaText((${segment.expression}))`],
+      : [`FormulaText((${runtimeExpression(segment.expression)}))`],
   );
   const concatenation = terms.join("+") || '""';
   return {

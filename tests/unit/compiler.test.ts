@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { compileSource, rewriteGlobalReferences } from "../../src/compiler";
+import {
+  PURE_FUNCTIONS,
+  SAFE_COMMANDS,
+  compileSource,
+  rewriteGlobalReferences,
+} from "../../src/compiler";
 
 const symbols = [
   { label: "a", type: "number", defined: true },
@@ -168,7 +173,9 @@ describe("v1 Authoring Source", () => {
       compile("@If(true, Delete(a), b)@").diagnostics.map(({ code }) => code),
     ).toContain("unsafe-command");
     expect(
-      compile("@FormulaText(a,b,a)@").diagnostics.map(({ code }) => code),
+      compile("@FormulaText(a,true,false)@").diagnostics.map(
+        ({ code }) => code,
+      ),
     ).not.toContain("unsupported-overload");
   });
 
@@ -213,6 +220,8 @@ describe("v1 Authoring Source", () => {
       "TableText({a})",
       "TableText({a},{b})",
       'TableText({a},{b},"v")',
+      'TableText({a},"v")',
+      "TableText({a},{b},{a})",
       'VerticalText("a")',
       "Ordinal(a)",
       "UnicodeToLetter(65)",
@@ -225,6 +234,140 @@ describe("v1 Authoring Source", () => {
     ];
     for (const expression of forms)
       expect(compile(`@${expression}@`).expression, expression).not.toBeNull();
+  });
+
+  it("accepts every v1 pure function and rejects unsupported function arities", () => {
+    const binary = new Set(["atan2", "gammaRegularized", "beta"]);
+    const ternary = new Set(["betaRegularized"]);
+    for (const name of PURE_FUNCTIONS) {
+      const args = ternary.has(name) ? "1,2,3" : binary.has(name) ? "1,2" : "1";
+      expect(compile(`@${name}(${args})@`).expression, name).not.toBeNull();
+      expect(compile(`@${name}()@`).expression, name).toBeNull();
+    }
+    expect(compile("@log(2,8)@").expression).not.toBeNull();
+    expect(compile("@round(1.234,2)@").expression).not.toBeNull();
+    expect(compile("@beta(1,2,3)@").expression).not.toBeNull();
+    expect(compile("@sin(1,2)@").diagnostics.map((d) => d.code)).toContain(
+      "unsupported-overload",
+    );
+  });
+
+  it("compiles the documented arcos spelling to the pinned runtime's acos spelling", () => {
+    expect(compile("@arcos(a)@").expression).toBe(
+      "FormulaText(Simplify(FormulaText((acos(a)))))",
+    );
+    expect(compile('@Text("arcos(a)")@').expression).toContain(
+      'Text("arcos(a)")',
+    );
+  });
+
+  it("checks nested command overloads and boolean arguments at their own depth", () => {
+    for (const source of [
+      "@FormulaText(a, a)@",
+      "@FractionText(a, a)@",
+      "@FormulaText(a, true, a)@",
+      "@Text(a, If(true, a, b))@",
+      "@If(true, FractionText(a, true, false), b)@",
+      "@TableText(a,true)@",
+      "@ScientificText(FractionText(a))@",
+    ])
+      expect(compile(source).expression, source).toBeNull();
+    expect(
+      compile("@FormulaText(a, If(a>0,true,false))@").expression,
+    ).not.toBeNull();
+  });
+
+  it("rejects every unsupported operation even when deeply nested", () => {
+    for (const operation of [
+      "Delete(a)",
+      "SetValue(a, 2)",
+      'Execute({"Delete(a)"})',
+      "Intersect(a,b)",
+      "Mystery(a)",
+      "a:=2",
+    ]) {
+      const result = compile(`@If(true, FractionText(1), ${operation})@`);
+      expect(result.expression, operation).toBeNull();
+    }
+  });
+
+  it("recognizes different live object types and distinguishes missing from undefined", () => {
+    const objects = [
+      "number",
+      "function",
+      "point",
+      "vector",
+      "equation",
+      "list",
+      "matrix",
+      "boolean",
+      "text",
+    ].map((type, index) => ({
+      label: `object_${index}`,
+      type,
+      defined: index !== 6,
+    }));
+    const result = compileSource(
+      `@${objects.map((o) => `FormulaText(${o.label})`).join('+" "+')}@`,
+      {
+        simplify: false,
+        symbols: objects,
+      },
+    );
+    expect(result.expression).not.toBeNull();
+    expect(result.references.map((r) => r.label)).toEqual(
+      objects.map((o) => o.label),
+    );
+    expect(result.diagnostics).toMatchObject([
+      { code: "undefined-value", severity: "warning" },
+    ]);
+    expect(
+      compileSource("@missing@", { simplify: false, symbols: objects })
+        .diagnostics[0],
+    ).toMatchObject({ code: "unresolved-reference", severity: "error" });
+  });
+
+  it("treats a live function object's call as one proven global reference", () => {
+    const result = compileSource("@f(a)+sqrt(b)@", {
+      simplify: false,
+      symbols: [...symbols, { label: "f", type: "function", defined: true }],
+    });
+    expect(result.expression).not.toBeNull();
+    expect(result.references.map((reference) => reference.label)).toEqual([
+      "f",
+      "a",
+      "b",
+    ]);
+    expect(
+      rewriteGlobalReferences("@f(a)@", "f", "g", [
+        ...symbols,
+        { label: "f", type: "function", defined: true },
+      ]).source,
+    ).toBe("@g(a)@");
+  });
+
+  it("requires one complete root value while allowing a list or point value", () => {
+    expect(compile("@{a,b}@").expression).not.toBeNull();
+    expect(compile("@(a,b)@").expression).not.toBeNull();
+    expect(compile("@a,b@").expression).toBeNull();
+    expect(compile("@If(true,{a,b},Intersect(a,b))@").expression).toBeNull();
+  });
+
+  it("keeps the documented catalog limited to the twelve approved commands", () => {
+    expect(Object.keys(SAFE_COMMANDS)).toEqual([
+      "FormulaText",
+      "FractionText",
+      "SurdText",
+      "ScientificText",
+      "TableText",
+      "VerticalText",
+      "Ordinal",
+      "UnicodeToLetter",
+      "Name",
+      "Text",
+      "Simplify",
+      "If",
+    ]);
   });
 
   it("preserves tabs, combining characters, and long literal lines", () => {

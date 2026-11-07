@@ -1,6 +1,6 @@
 # LaTeX Text Editor for GeoGebra
 
-An unofficial, local-first editor for authoring LaTeX text in GeoGebra constructions. This repository currently contains the application shell: a pinned GeoGebra Classic applet, a CodeMirror editor area, and a resizable split. Text editing and `.ggb` file operations will arrive in later slices of the [accepted specification](docs/specs/0001-v0.1.0-geogebra-latex-editor.md).
+An unofficial, local-first editor for authoring LaTeX text in GeoGebra constructions. The [accepted specification](docs/specs/0001-v0.1.0-geogebra-latex-editor.md) defines the release behavior; implementation is proceeding one issue at a time.
 
 ## Run locally
 
@@ -19,6 +19,29 @@ Authoring Source is stored in a hidden, auxiliary, fixed, non-selectable GeoGebr
 The recognized older format is schema version 0 with no `languageVersion` or `simplify` field. It migrates in memory to schema version 1 and defaults Sign Simplification to off. The original encoded bytes remain available through **Download original metadata**, backed by tab-local session storage across reloads, until a migrated `.ggb` download is dispatched. The carrier is the supported construction object; the application does not depend on extra `.ggb` archive entries.
 
 The pinned GeoGebra `5.4.920.0` Chromium contract test in `tests/e2e/metadata-capacity.spec.ts` exports a carrier containing more than 1 MiB of decoded JSON and 100 Managed Text records, then opens the `.ggb` data in a fresh applet and verifies the exact encoded value and auxiliary properties. Run it with `npx playwright test tests/e2e/metadata-capacity.spec.ts` after installing Chromium.
+
+## Value Expression catalog (language version 1)
+
+Inside `@...@`, completion offers current construction labels, the safe English GeoGebra commands below, pure functions, and constants. Every nested operation is checked before Apply; unknown commands, actions, assignments, and multi-output commands are rejected. A missing label is an error. An existing undefined object produces a warning and can still be applied. The editor does not evaluate raw expressions to validate them.
+
+| Command           | Supported arguments                                                |
+| ----------------- | ------------------------------------------------------------------ |
+| `FormulaText`     | value; value, boolean; value, boolean, boolean                     |
+| `FractionText`    | value; value, boolean                                              |
+| `SurdText`        | value; number, list                                                |
+| `ScientificText`  | number; number, number                                             |
+| `TableText`       | one to three lists, or one or two lists followed by alignment text |
+| `VerticalText`    | value                                                              |
+| `Ordinal`         | value                                                              |
+| `UnicodeToLetter` | value                                                              |
+| `Name`            | value                                                              |
+| `Text`            | value; value, boolean (positioned forms are excluded)              |
+| `Simplify`        | value                                                              |
+| `If`              | boolean, value; boolean, value, value                              |
+
+The pure built-in functions are `abs`, `sgn`, `sqrt`, `exp`, `log`, `ln`, `ld`, `lg`, `cos`, `sin`, `tan`, `acos`, `arcos`, `arccos`, `asin`, `arcsin`, `atan`, `arctan`, `atan2`, `cosh`, `sinh`, `tanh`, `acosh`, `arcosh`, `arccosh`, `asinh`, `arcsinh`, `atanh`, `arctanh`, `erf`, `floor`, `ceil`, `round`, `conjugate`, `arg`, `gamma`, `gammaRegularized`, `beta`, `betaRegularized`, `sec`, `csc`, `cosec`, `cot`, `sech`, `csch`, and `coth`. All take one argument except `atan2` and `gammaRegularized` (two), `beta` (two or three), and `betaRegularized` (three); `gamma`, `log`, and `round` accept one or two. `arcos` is accepted in Authoring Source and compiled as `acos` for the pinned GeoGebra runtime. `random` is excluded.
+
+Completion also offers `x`, `y`, `z`, `true`, `false`, `π`, `ℯ`, `ί`, `i`, and `e` inside interpolations. Outside interpolations, the supported LaTeX completion list is `\frac`, `\sqrt`, `\text`, `\left`, `\right`, `\alpha`, `\beta`, `\gamma`, `\pi`, `\sum`, `\int`, `\cdot`, `\times`, `\begin`, `\end`, `\overline`, `\vec`, and `\mathbf`. This is a curated GeoGebra-oriented subset rather than a full TeX catalog.
 
 ## Licensing
 

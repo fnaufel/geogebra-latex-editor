@@ -11,8 +11,9 @@ test("draft editing shows diagnostics and a one-line definition without evaluati
         setHTML5Codebase() {}
         inject() { this.params.appletOnLoad({
           getVersion: () => '5.4.920.0', setWidth() {}, setHeight() {},
-          getAllObjectNames: () => ['a'], getObjectType: () => 'number',
-          isDefined: () => true,
+          getAllObjectNames: () => ['a', 'P', 'u_1', 'flag'],
+          getObjectType: (label) => ({a:'number',P:'point',u_1:'vector',flag:'boolean'})[label] || '',
+          isDefined: (label) => label !== 'flag',
           evalCommand: () => { throw new Error('Draft evaluated GeoGebra'); }
         }); }
       };`,
@@ -45,4 +46,18 @@ test("draft editing shows diagnostics and a one-line definition without evaluati
   await expect(
     page.getByRole("option", { name: "FractionText" }),
   ).toBeVisible();
+  await editor.fill("@P");
+  await editor.press("Control+Space");
+  await expect(page.getByRole("option", { name: /P.*point/ })).toBeVisible();
+  await editor.fill("@u_");
+  await editor.press("Control+Space");
+  await expect(page.getByRole("option", { name: /u_1.*vector/ })).toBeVisible();
+  await editor.fill("@De");
+  await editor.press("Control+Space");
+  await expect(page.getByRole("option", { name: /Delete/ })).toHaveCount(0);
+  await editor.fill('@Text("Fr');
+  await editor.press("Control+Space");
+  await expect(page.getByRole("option", { name: "FractionText" })).toHaveCount(
+    0,
+  );
 });

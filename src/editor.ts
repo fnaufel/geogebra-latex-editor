@@ -16,6 +16,7 @@ import { basicSetup } from "codemirror";
 import {
   PURE_FUNCTIONS,
   SAFE_COMMANDS,
+  VALUE_CONSTANTS,
   scanSource,
   type CompileResult,
   type SymbolInfo,
@@ -67,7 +68,18 @@ function sourceCompletion(
   symbols: () => readonly SymbolInfo[],
 ): CompletionResult | null {
   const before = context.state.doc.sliceString(0, context.pos);
-  const interpolation = scanSource(before).openInterpolationFrom !== null;
+  const opening = scanSource(before).openInterpolationFrom;
+  const interpolation = opening !== null;
+  if (opening !== null) {
+    const expression = before.slice(opening + 1);
+    let quoted = false;
+    for (let index = 0; index < expression.length; index++) {
+      if (expression[index] !== '"') continue;
+      if (quoted && expression[index + 1] === '"') index++;
+      else quoted = !quoted;
+    }
+    if (quoted) return null;
+  }
   const match = interpolation
     ? /[\p{L}\p{M}\p{N}_]*$/u.exec(before)
     : /\\?[A-Za-z]*$/u.exec(before);
@@ -84,7 +96,7 @@ function sourceCompletion(
           type: "function",
         })),
         ...PURE_FUNCTIONS.map((label) => ({ label, type: "function" })),
-        ...["x", "y", "z", "true", "false", "π", "ℯ"].map((label) => ({
+        ...VALUE_CONSTANTS.map((label) => ({
           label,
           type: "constant",
         })),
