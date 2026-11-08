@@ -20,7 +20,7 @@ If a Managed Text Object is deleted, its source may appear as **Orphaned Source*
 
 ## Authoring syntax
 
-Write a LaTeX body with `@expression@` for each **GeoGebra Interpolation**. For example, `@a@ x^2 + @b@ x = @a@ \\left( x^2 + @FractionText(b/a)@ x \\right)` uses two construction values and a safe text-producing command. Use `@@` in a Literal Segment for one printed `@`, such as `contact@@example.com`. An unmatched `@` or an empty interpolation is an error with a source range. Interpolations can span lines, but cannot contain `@` even inside a quoted GeoGebra string.
+Write a LaTeX body with `@expression@` for each **GeoGebra Interpolation**. For example, `@a@ x^2 + @b@ x = @a@ \left( x^2 + @FractionText(b/a)@ x \right)` uses two construction values and a safe text-producing command. Use `@@` in a Literal Segment for one printed `@`, such as `contact@@example.com`. An unmatched `@` or an empty interpolation is an error with a source range. Interpolations can span lines, but cannot contain `@` even inside a quoted GeoGebra string.
 
 Source line endings are normalized to spaces in the Compiled Definition. Type an explicit LaTeX `\\` when you want a rendered line break. LaTeX backslashes and ASCII quotation marks are preserved in the text passed to GeoGebra. The editor offers a curated set of GeoGebra-supported LaTeX commands outside interpolations and live object labels, constants, pure functions, and the [safe Value Expression catalog](../README.md#value-expression-catalog-language-version-1) inside them. This is not a full TeX distribution.
 

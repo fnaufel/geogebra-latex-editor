@@ -189,6 +189,7 @@ const appliedSource = required<HTMLElement>("#applied-source");
 let refreshSymbols = () => {};
 let insertionActive = false;
 let fileOperationBusy = false;
+let recoveryActionMessage = "";
 
 function renderAppletState(state: AppletState): void {
   const ready = state.kind === "ready" && !fileOperationBusy;
@@ -326,9 +327,12 @@ const authoring = mountAuthoringEditor(
       ? "Dirty Construction · changes since last open or download"
       : "Construction current";
     localRecovery.textContent = `Local recovery (${recoveryCandidates.length})`;
-    recoveryStatus.textContent = recoveryCandidates.length
-      ? `${recoveryCandidates.length} local Recovery Draft ${recoveryCandidates.length === 1 ? "entry is" : "entries are"} available.`
-      : "";
+    if (recoveryCandidates.length) recoveryActionMessage = "";
+    recoveryStatus.textContent =
+      recoveryActionMessage ||
+      (recoveryCandidates.length
+        ? `${recoveryCandidates.length} local Recovery Draft ${recoveryCandidates.length === 1 ? "entry is" : "entries are"} available.`
+        : "");
     concurrentWarning.hidden = !concurrentTabWarning;
     concurrentWarning.textContent = concurrentTabWarning
       ? "Another tab has this construction open. Tabs remain independent; review changes before downloading."
@@ -474,7 +478,9 @@ function applyDraft(): void {
   if (fileOperationBusy) return;
   void authoring
     .apply()
-    .then(() => editorHost.querySelector<HTMLElement>('[role="textbox"]')?.focus())
+    .then(() =>
+      editorHost.querySelector<HTMLElement>('[role="textbox"]')?.focus(),
+    )
     .catch(reportActionError);
 }
 applyButton.addEventListener("click", applyDraft);
@@ -654,7 +660,8 @@ clearLocalRecovery.addEventListener("click", () => {
     )
       return;
     const removed = await authoring.clearLocalRecovery();
-    recoveryStatus.textContent = `Cleared ${removed.records} local recovery records (${removed.bytes} bytes).`;
+    recoveryActionMessage = `Cleared ${removed.records} local recovery records (${removed.bytes} bytes).`;
+    recoveryStatus.textContent = recoveryActionMessage;
     renderRecoveryEntries();
   })().catch((error: unknown) => reportActionError(error, "recovery"));
 });

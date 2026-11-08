@@ -5,6 +5,7 @@ interface LiveApplet {
   setXML(xml: string): void;
   getCommandString(label: string, localized: boolean): string;
   getValueString(label: string): string;
+  getAllObjectNames(): string[];
   getCaption(label: string, substitutePlaceholders: boolean): string;
   setColor(label: string, red: number, green: number, blue: number): void;
   setLayer(label: string, layer: number): void;
@@ -240,9 +241,17 @@ test("failed rollback halts Apply and offers its snapshot and draft after reload
     page.getByRole("status", { name: "Applet status" }),
   ).toContainText("GeoGebra ready", { timeout: 90_000 });
   await page.getByRole("button", { name: "New Managed Text" }).click();
-  const expectedSnapshot = await page.evaluate(() =>
-    (window as typeof window & { ggbApplet: LiveApplet }).ggbApplet.getXML(),
-  );
+  const constructionState = () =>
+    page.evaluate(() => {
+      const api = (window as typeof window & { ggbApplet: LiveApplet })
+        .ggbApplet;
+      return {
+        target: api.getXML("text1"),
+        metadata: api.getXML("gglatexEditorMetadataV1"),
+        labels: api.getAllObjectNames().sort(),
+      };
+    });
+  const expectedSnapshot = await constructionState();
   await page.evaluate(() => {
     const api = (window as typeof window & { ggbApplet: LiveApplet }).ggbApplet;
     const evaluate = api.evalCommand.bind(api);
@@ -321,9 +330,5 @@ test("failed rollback halts Apply and offers its snapshot and draft after reload
     "Draft Source has unapplied changes",
   );
   await expect(recover).toBeHidden();
-  expect(
-    await page.evaluate(() =>
-      (window as typeof window & { ggbApplet: LiveApplet }).ggbApplet.getXML(),
-    ),
-  ).toBe(expectedSnapshot);
+  expect(await constructionState()).toEqual(expectedSnapshot);
 });

@@ -47,7 +47,31 @@ test("the motivating formula updates when its construction values change", async
       }, label),
     )
     .not.toBe(before);
-  await expect(page.getByRole("textbox", { name: "Authoring Source" })).toHaveText(
-    source,
+  await expect(
+    page.getByRole("textbox", { name: "Authoring Source" }),
+  ).toHaveText(source);
+});
+
+test("the published example opens with its Managed Text Authoring Source", async ({
+  page,
+}) => {
+  test.slow();
+  await page.goto("./");
+  await expect(
+    page.getByRole("status", { name: "Applet status" }),
+  ).toContainText("GeoGebra ready (5.4.920.0)", { timeout: 90_000 });
+  await page
+    .locator("#file-input")
+    .setInputFiles("examples/motivating-formula.ggb");
+  await expect(page.locator("#filename")).toHaveText(
+    "motivating-formula-edited.ggb",
   );
+  await expect(
+    page.getByRole("textbox", { name: "Authoring Source" }),
+  ).toHaveText(
+    "@a@ x^2 + @b@ x = @a@ \\left( x^2 + @FractionText(b/a)@ x \\right)",
+  );
+  await expect(
+    page.getByRole("checkbox", { name: "Clean signs and 1x coefficients" }),
+  ).toBeChecked();
 });

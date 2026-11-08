@@ -1255,19 +1255,25 @@ export class AuthoringWorkspace {
       simplify: this.simplify,
       target: this.editingTarget?.id,
     });
-    await this.adapter.importBase64(
-      base64,
-      () =>
-        before ===
-        JSON.stringify({
-          drafts: [...this.drafts],
-          source: this.source,
-          simplify: this.simplify,
-          target: this.editingTarget?.id,
-        }),
-    );
+    const previousActionError = this.actionErrorMessage;
+    this.actionErrorMessage = null;
+    try {
+      await this.adapter.importBase64(
+        base64,
+        () =>
+          before ===
+          JSON.stringify({
+            drafts: [...this.drafts],
+            source: this.source,
+            simplify: this.simplify,
+            target: this.editingTarget?.id,
+          }),
+      );
+    } catch (error) {
+      this.actionErrorMessage = previousActionError;
+      throw error;
+    }
     this.lastSnapshot = base64;
-    this.clearActionError();
     this.drafts.clear();
     this.draftBaselines.clear();
     this.undoneAdoptions.clear();

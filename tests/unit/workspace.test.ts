@@ -220,6 +220,39 @@ it("cancels Open if a Draft Source changes while the candidate is staging", asyn
   expect(workspace.hasAnyDraft).toBe(true);
 });
 
+it("keeps the candidate's metadata notice visible after Open", async () => {
+  let listener: (event: ConstructionEvent) => void = () => {};
+  const adapter: WorkspaceAdapter = {
+    getSymbols: () => [],
+    getUnmanagedTextSnapshot: () => "unmanaged",
+    adoptUnmanagedText: async () => {
+      throw new Error("Adoption is unavailable.");
+    },
+    createManagedText: async () => {
+      throw new Error("Creation is unavailable.");
+    },
+    applyManagedText: async () => {
+      throw new Error("Apply is unavailable.");
+    },
+    importBase64: async () => {
+      listener({
+        kind: "metadata-error",
+        message:
+          "Authoring Source metadata is malformed; the original carrier is preserved.",
+      });
+    },
+    getManagedTexts: () => [],
+    exportBase64: async () => "file",
+    onEvent: (callback) => {
+      listener = callback;
+      return () => {};
+    },
+  };
+  const workspace = new AuthoringWorkspace(() => {}, adapter);
+  await workspace.open("candidate");
+  expect(workspace.actionError).toContain("[METADATA_MALFORMED]");
+});
+
 function fakeWorkspace(texts: ManagedText[]) {
   let listener: (event: ConstructionEvent) => void = () => {};
   const adapter: WorkspaceAdapter = {
