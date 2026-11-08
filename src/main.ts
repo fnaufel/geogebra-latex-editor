@@ -1,6 +1,7 @@
 import { mountAuthoringEditor } from "./editor";
 import { AppletState, GeoGebraAdapter, GEOGEBRA_VERSION } from "./geogebra";
 import { failureNotice, type FailurePhase } from "./diagnostics";
+import packageInfo from "../package.json";
 import "./style.css";
 
 const root = document.querySelector<HTMLDivElement>("#app");
@@ -16,7 +17,7 @@ root.innerHTML = `
         <p>Construction workspace</p>
       </div>
     </div>
-    <span class="pin">GeoGebra Classic ${GEOGEBRA_VERSION}</span>
+    <span class="pin">App ${packageInfo.version} · GeoGebra Classic ${GEOGEBRA_VERSION}</span>
     <div class="file-actions">
       <button id="new-construction" type="button" disabled>New construction</button>
       <button id="new-managed-text" type="button" disabled>New Managed Text</button>
@@ -111,6 +112,7 @@ root.innerHTML = `
   <footer class="footer">
     <span>Unofficial · Made with GeoGebra®</span>
     <nav aria-label="Project and GeoGebra information">
+      <a href="https://github.com/fnaufel/geogebra-latex-editor/blob/master/docs/user-guide.md">User guide</a>
       <a href="https://github.com/fnaufel/geogebra-latex-editor">Project source</a>
       <a href="https://www.geogebra.org/license">GeoGebra license</a>
       <a href="https://www.geogebra.org/tos">GeoGebra terms</a>
@@ -470,10 +472,18 @@ window.addEventListener("keydown", (event) => {
 });
 function applyDraft(): void {
   if (fileOperationBusy) return;
-  void authoring.apply().catch(reportActionError);
+  void authoring
+    .apply()
+    .then(() => editorHost.querySelector<HTMLElement>('[role="textbox"]')?.focus())
+    .catch(reportActionError);
 }
 applyButton.addEventListener("click", applyDraft);
 reapplyButton.addEventListener("click", applyDraft);
+editorHost.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey)) return;
+  event.preventDefault();
+  if (authoring.hasDraft()) applyDraft();
+});
 discardDraftButton.addEventListener("click", () => {
   authoring.discardDraft();
 });

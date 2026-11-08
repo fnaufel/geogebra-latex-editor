@@ -1,16 +1,16 @@
 # LaTeX Text Editor for GeoGebra
 
-An unofficial, local-first editor for authoring LaTeX text in GeoGebra constructions. The [accepted specification](docs/specs/0001-v0.1.0-geogebra-latex-editor.md) defines the release behavior; implementation is proceeding one issue at a time.
+An unofficial, local-first editor for authoring LaTeX text in GeoGebra constructions. Start with the [user guide](docs/user-guide.md), try the [example construction](examples/motivating-formula.ggb), and use the [release checklist](docs/release-checklist.md) for validation. The [accepted specification](docs/specs/0001-v0.1.0-geogebra-latex-editor.md) defines the release behavior.
 
 ## Run locally
 
 Use Node.js `26.13.0` and npm `12.2.2`. From the repository root, run `npm ci` and `npm run dev`. Open the local URL printed by Vite. The app loads GeoGebra Classic `5.4.920.0` from GeoGebra's CDN, so it needs a network connection.
 
-Run `npx playwright install chromium` once before browser tests. `npm run check` runs formatting, linting, type checking, unit tests, the production build, and Chromium browser tests. Individual commands are `npm run typecheck`, `npm run test:unit`, `npm run test:e2e`, and `npm run build`. CI runs these checks on pull requests and deploys the static build from `master` to GitHub Pages only after they pass. Vite uses the `/geogebra-latex-editor/` base path for Pages.
+Run `npx playwright install chromium firefox webkit` once before browser tests. `npm run check` runs formatting, linting, type checking, unit tests, the production build, and browser tests in Chromium, Firefox, and Playwright WebKit. For routine Chromium-only feedback use `npm run test:e2e -- --project=chromium`. Individual commands are `npm run typecheck`, `npm run test:unit`, `npm run test:e2e`, and `npm run build`. CI runs these checks on pull requests and deploys the static build from `master` to GitHub Pages only after they pass. Vite uses the `/geogebra-latex-editor/` base path for Pages. The deployment remains pending until this release candidate is pushed and Pages is enabled for the repository.
 
 ## Scope and access
 
-The shell keeps construction and editor data in the browser and includes no analytics, account integration, or application server. The editor remains read-only until the Editing Target workflow is implemented. GeoGebra's own menus, file controls, and sign-in controls are hidden; its construction toolbar and Undo/Redo controls remain visible. The surrounding shell supports keyboard resizing and visible focus. Accessibility inside the embedded GeoGebra applet depends on GeoGebra and is outside this project's control.
+Construction and editor data stay in the browser; the app has no analytics, account integration, or application server. GeoGebra's own menus, file controls, and sign-in controls are hidden; its construction toolbar and Undo/Redo controls remain visible. The surrounding interface supports keyboard resizing, visible focus, and announced status changes. Accessibility inside the embedded GeoGebra applet depends on GeoGebra and is outside this project's control. Branded browser support remains provisional until recorded human checks pass; Playwright WebKit does not certify Safari.
 
 ## Embedded Authoring Source metadata
 

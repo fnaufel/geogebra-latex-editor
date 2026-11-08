@@ -5,8 +5,12 @@ export default defineConfig({
   timeout: 45_000,
   use: {
     baseURL: "http://127.0.0.1:5173/geogebra-latex-editor/",
-    ...devices["Desktop Chrome"],
   },
+  projects: [
+    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    { name: "firefox", use: { ...devices["Desktop Firefox"] } },
+    { name: "webkit", use: { ...devices["Desktop Safari"] } },
+  ],
   webServer: {
     command: "npm run dev -- --host 127.0.0.1",
     url: "http://127.0.0.1:5173/geogebra-latex-editor/",
