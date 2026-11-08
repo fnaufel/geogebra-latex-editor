@@ -1,5 +1,6 @@
 import { mountAuthoringEditor } from "./editor";
 import { AppletState, GeoGebraAdapter, GEOGEBRA_VERSION } from "./geogebra";
+import { failureNotice, type FailurePhase } from "./diagnostics";
 import "./style.css";
 
 const root = document.querySelector<HTMLDivElement>("#app");
@@ -49,7 +50,7 @@ root.innerHTML = `
       <div class="pane-heading"><h2 id="editor-heading">Authoring Source</h2></div>
       <div class="editor-intro">
         <strong id="target-label">No Editing Target</strong>
-        <p id="target-state">No text is open for editing.</p>
+        <p id="target-state" role="status" aria-live="polite" aria-atomic="true">No text is open for editing.</p>
         <p id="selection-state" role="status" aria-live="polite">Select one text object in GeoGebra, then choose Edit selected text.</p>
         <div class="editor-actions">
           <button id="edit-selected" type="button" disabled>Edit selected text</button>
@@ -75,9 +76,11 @@ root.innerHTML = `
         <label class="simplify-control"><input id="simplify" type="checkbox" checked>Clean signs and 1x coefficients</label>
         <p class="simplify-help">GeoGebra rewrites the complete text without understanding LaTeX. For example, \\text{C++} can become \\text{C + }, and \\text{--} can become \\text{ + }.</p>
         <h3>Diagnostics</h3>
-        <div id="diagnostics" aria-live="polite"></div>
+        <p id="diagnostic-summary" role="status" aria-live="polite" aria-atomic="true"></p>
+        <div id="diagnostics"></div>
         <details class="advanced"><summary>Advanced</summary><p>Compiled Definition</p><pre id="compiled-definition" aria-label="Compiled Definition"></pre><button id="copy-definition" type="button">Copy definition</button></details>
       </div>
+      <div class="diagnostic-actions" role="group" aria-label="Private failure report"><button id="copy-diagnostic-report" type="button">Copy diagnostic report</button><button id="download-diagnostic-report" type="button">Download diagnostic report</button></div>
     </section>
   </main>
   <dialog id="download-dialog" aria-labelledby="download-title">
@@ -128,6 +131,12 @@ const status = required<HTMLElement>("#applet-state");
 const noticeText = required<HTMLElement>("#notice-text");
 const loadingMark = required<HTMLElement>("#loading-mark");
 const retry = required<HTMLButtonElement>("#retry");
+const copyDiagnosticReport = required<HTMLButtonElement>(
+  "#copy-diagnostic-report",
+);
+const downloadDiagnosticReport = required<HTMLButtonElement>(
+  "#download-diagnostic-report",
+);
 const splitter = required<HTMLElement>("#splitter");
 const editorHost = required<HTMLElement>("#editor");
 const unmanagedSource = required<HTMLElement>("#unmanaged-source");
@@ -201,10 +210,12 @@ function renderAppletState(state: AppletState): void {
       queueMicrotask(refreshSymbols);
       break;
     case "version-mismatch":
-      status.textContent = `Version mismatch: expected ${GEOGEBRA_VERSION}, received ${state.actual}.`;
+      status.textContent = `GeoGebra compatibility failure. Expected ${GEOGEBRA_VERSION}. Retry GeoGebra to load the pinned version.`;
+      authoring.recordDiagnostic("compatibility", "APPLET_VERSION_MISMATCH");
       break;
     case "error":
-      status.textContent = `GeoGebra initialization failed: ${state.message}`;
+      status.textContent = failureNotice(state.message, "applet").message;
+      authoring.recordDiagnostic("applet", "APPLET_LOAD_FAILED");
       break;
   }
   noticeText.textContent = status.textContent;
@@ -214,6 +225,7 @@ const adapter = new GeoGebraAdapter(appletElement, renderAppletState);
 const authoring = mountAuthoringEditor(
   editorHost,
   required<HTMLElement>("#diagnostics"),
+  required<HTMLElement>("#diagnostic-summary"),
   required<HTMLElement>("#compiled-definition"),
   simplifyInput,
   required<HTMLButtonElement>("#copy-definition"),
@@ -245,7 +257,7 @@ const authoring = mountAuthoringEditor(
         : orphaned
           ? `Orphaned Source: ${orphaned.targetLabel}`
           : "No Editing Target";
-    targetState.textContent =
+    const targetMessage =
       actionError ??
       (orphaned
         ? orphaned.candidates.length
@@ -266,6 +278,8 @@ const authoring = mountAuthoringEditor(
             : recoveryAvailable
               ? "A failed Apply snapshot and Draft Source are available to restore."
               : "No text is open for editing.");
+    if (targetState.textContent !== targetMessage)
+      targetState.textContent = targetMessage;
     applyButton.disabled =
       fileOperationBusy || !target || !hasDraft || !canApply;
     adoptButton.hidden = !unmanaged;
@@ -358,9 +372,33 @@ function setFileOperationBusy(busy: boolean): void {
   } else authoring.refreshSymbols();
 }
 
-function reportActionError(error: unknown): Promise<void> {
-  return authoring.reportActionError(error);
+function reportActionError(
+  error: unknown,
+  phase: FailurePhase = "transaction",
+): Promise<void> {
+  return authoring.reportActionError(error, phase);
 }
+
+copyDiagnosticReport.addEventListener("click", () => {
+  void navigator.clipboard
+    .writeText(authoring.diagnosticReport(navigator.userAgent))
+    .then(() => {
+      interactionState.textContent = "Sanitized diagnostic report copied.";
+    })
+    .catch((error: unknown) => reportActionError(error, "file"));
+});
+downloadDiagnosticReport.addEventListener("click", () => {
+  const url = URL.createObjectURL(
+    new Blob([authoring.diagnosticReport(navigator.userAgent)], {
+      type: "application/json",
+    }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "geogebra-latex-editor-diagnostic.json";
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+});
 
 function confirmReplacement(action: "New" | "Open"): boolean {
   if (
@@ -446,7 +484,9 @@ recoverFailedApplyButton.addEventListener("click", () => {
     )
   )
     return;
-  void authoring.recoverFailedApply().catch(reportActionError);
+  void authoring
+    .recoverFailedApply()
+    .catch((error: unknown) => reportActionError(error, "recovery"));
 });
 openFile.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", () => {
@@ -465,7 +505,7 @@ fileInput.addEventListener("change", () => {
     filename.textContent = file.name.replace(/\.ggb$/i, "") + "-edited.ggb";
     refreshSymbols();
   })()
-    .catch(reportActionError)
+    .catch((error: unknown) => reportActionError(error, "file"))
     .finally(() => {
       setFileOperationBusy(false);
       fileInput.value = "";
@@ -528,7 +568,7 @@ confirmDownload.addEventListener("click", () => {
     downloadDialog.close();
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
   })()
-    .catch(reportActionError)
+    .catch((error: unknown) => reportActionError(error, "file"))
     .finally(() => setFileOperationBusy(false));
 });
 downloadOriginalMetadata.addEventListener("click", () => {
@@ -573,7 +613,7 @@ function renderRecoveryEntries(): void {
           recoveryDialog.close();
           renderRecoveryEntries();
         })
-        .catch(reportActionError);
+        .catch((error: unknown) => reportActionError(error, "recovery"));
     });
     const discard = document.createElement("button");
     discard.type = "button";
@@ -582,7 +622,7 @@ function renderRecoveryEntries(): void {
       void authoring
         .discardRecovery(record.key)
         .then(renderRecoveryEntries)
-        .catch(reportActionError);
+        .catch((error: unknown) => reportActionError(error, "recovery"));
     });
     entry.append(heading, details, restore, discard);
     recoveryEntries.append(entry);
@@ -606,7 +646,7 @@ clearLocalRecovery.addEventListener("click", () => {
     const removed = await authoring.clearLocalRecovery();
     recoveryStatus.textContent = `Cleared ${removed.records} local recovery records (${removed.bytes} bytes).`;
     renderRecoveryEntries();
-  })().catch(reportActionError);
+  })().catch((error: unknown) => reportActionError(error, "recovery"));
 });
 window.addEventListener("pagehide", () => void authoring.dispose());
 new ResizeObserver(() => adapter.resize()).observe(

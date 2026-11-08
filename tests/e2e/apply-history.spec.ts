@@ -213,6 +213,11 @@ test("failed grouped metadata write rolls back the applet and retains Draft Sour
   await expect(page.locator("#target-state")).toContainText(
     "[APPLY_ROLLED_BACK/APPLY_METADATA_FAILED]",
   );
+  await expect(
+    page
+      .getByRole("status")
+      .filter({ hasText: "[APPLY_ROLLED_BACK/APPLY_METADATA_FAILED]" }),
+  ).toBeVisible();
   await expect
     .poll(async () => (await editor.innerText()).trim())
     .toBe("keep this draft");
@@ -264,7 +269,7 @@ test("failed rollback halts Apply and offers its snapshot and draft after reload
     .toBe("recover me");
   await page.getByRole("button", { name: "Apply", exact: true }).click();
   await expect(page.locator("#target-state")).toContainText(
-    "Apply is disabled after a failed rollback",
+    "Further Apply is disabled",
   );
   const [otherTab] = await Promise.all([
     page.context().waitForEvent("page"),

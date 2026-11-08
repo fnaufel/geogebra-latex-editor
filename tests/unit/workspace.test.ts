@@ -691,6 +691,32 @@ it("keeps Apply failure diagnostics with workspace state until the draft is disc
   expect(workspace.actionError).toBeNull();
 });
 
+it("redacts exception text while keeping a useful Apply recovery action", async () => {
+  const text: ManagedText = {
+    id: "one",
+    targetLabel: "text1",
+    source: "old",
+    simplify: true,
+    compiledFingerprint: "old",
+  };
+  const { workspace } = fakeWorkspace([text]);
+  await workspace.create();
+  workspace.setSource("private draft");
+  await workspace.reportActionError(
+    new ApplyFailure(
+      "APPLY_ROLLED_BACK",
+      "private draft from file secret.ggb",
+      "APPLY_METADATA_FAILED",
+    ),
+    false,
+  );
+  expect(workspace.actionError).toContain("APPLY_METADATA_FAILED");
+  expect(workspace.actionError).toContain("Retry Apply");
+  expect(workspace.actionError).not.toMatch(/private draft|secret\.ggb/);
+  expect(workspace.currentSource).toBe("private draft");
+  expect(workspace.target?.source).toBe("old");
+});
+
 it("keeps a pinned target and its draft when the target is renamed", async () => {
   vi.useFakeTimers();
   let text: ManagedText = {

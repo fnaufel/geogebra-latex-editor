@@ -199,7 +199,7 @@ test("Open stages good files, rejects corrupt files, and honors canceled replace
     buffer: Buffer.from("corrupt"),
   });
   await expect(page.locator("#target-state")).toContainText(
-    "not a readable .ggb archive",
+    "FILE_OPERATION_FAILED",
   );
   await expect(page.locator("#target-label")).toHaveText(originalLabel);
   await expect(page.locator("#filename")).toHaveText("construction.ggb");

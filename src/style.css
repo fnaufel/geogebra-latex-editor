@@ -373,6 +373,16 @@ button:hover {
   text-align: left;
   font-weight: 400;
 }
+.diagnostic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.35rem 0.9rem 0.7rem;
+  background: #f9fafc;
+}
+.diagnostic-actions button {
+  margin-top: 0;
+}
 .advanced {
   margin-top: 0.6rem;
 }

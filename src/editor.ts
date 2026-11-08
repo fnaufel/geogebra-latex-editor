@@ -22,6 +22,7 @@ import {
   type SymbolInfo,
 } from "./compiler";
 import { AuthoringWorkspace } from "./workspace";
+import type { FailurePhase } from "./diagnostics";
 import type { RecoveryRecord } from "./recovery";
 import type { GeoGebraAdapter, ManagedText, OrphanedText } from "./geogebra";
 
@@ -167,6 +168,7 @@ const highlighting = ViewPlugin.fromClass(
 export function mountAuthoringEditor(
   editorHost: HTMLElement,
   diagnosticsHost: HTMLElement,
+  diagnosticSummary: HTMLElement,
   compiledHost: HTMLElement,
   simplifyInput: HTMLInputElement,
   copyButton: HTMLButtonElement,
@@ -202,7 +204,9 @@ export function mountAuthoringEditor(
   openOrphaned: (id: string) => void;
   discardOrphaned: () => Promise<void>;
   discardDraft: () => void;
-  reportActionError: (error: unknown) => Promise<void>;
+  reportActionError: (error: unknown, phase?: FailurePhase) => Promise<void>;
+  recordDiagnostic: (phase: FailurePhase, code: string) => void;
+  diagnosticReport: (userAgent: string) => string;
   clearActionError: () => void;
   recoverFailedApply: () => Promise<void>;
   startInsertion: () => void;
@@ -211,6 +215,7 @@ export function mountAuthoringEditor(
   const getSymbols = () => adapter.getSymbols();
   let replacing = false;
   let shownId: string | null = null;
+  let lastDiagnosticSummary = "";
   const states = new Map<string, EditorState>();
   const emitState = (canApply = workspace.result.expression !== null) =>
     onState({
@@ -259,6 +264,20 @@ export function mountAuthoringEditor(
     compiledHost.textContent =
       result.expression ?? "No definition while errors remain.";
     copyButton.disabled = result.expression === null;
+    const errorCount = result.diagnostics.filter(
+      (diagnostic) => diagnostic.severity === "error",
+    ).length;
+    const warningCount = result.diagnostics.length - errorCount;
+    const summary =
+      errorCount || warningCount
+        ? `${errorCount} source errors and ${warningCount} warnings. Use the Diagnostics buttons to navigate.`
+        : "";
+    if (summary !== lastDiagnosticSummary) {
+      diagnosticSummary.textContent = summary;
+      lastDiagnosticSummary = summary;
+    }
+    for (const diagnostic of result.diagnostics)
+      workspace.recordDiagnostic("compiler", diagnostic.code);
     diagnosticsHost.replaceChildren();
     if (result.diagnostics.length === 0) {
       const message = document.createElement("p");
@@ -427,8 +446,14 @@ export function mountAuthoringEditor(
       showTarget();
     },
     discardDraft: () => workspace.discardDraft(),
-    reportActionError: (error) =>
-      workspace.reportActionError(error, adapter.hasRecoverableApplySnapshot),
+    reportActionError: (error, phase) =>
+      workspace.reportActionError(
+        error,
+        adapter.hasRecoverableApplySnapshot,
+        phase,
+      ),
+    recordDiagnostic: (phase, code) => workspace.recordDiagnostic(phase, code),
+    diagnosticReport: (userAgent) => workspace.diagnosticReport(userAgent),
     clearActionError: () => workspace.clearActionError(),
     recoverFailedApply: async () => {
       await workspace.recoverFailedApply();

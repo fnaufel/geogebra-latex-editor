@@ -12,6 +12,12 @@ import {
   type OrphanedText,
 } from "./geogebra";
 import {
+  DiagnosticHistory,
+  failureNotice,
+  metadataNotice,
+  type FailurePhase,
+} from "./diagnostics";
+import {
   clearFailedApplyRecovery,
   readFailedApplyRecovery,
   saveFailedApplyRecovery,
@@ -101,6 +107,7 @@ export class AuthoringWorkspace {
   private unsubscribe?: () => void;
   private message = "";
   private actionErrorMessage: string | null = null;
+  private readonly diagnosticHistory = new DiagnosticHistory();
   private recoveryRecord: FailedApplyRecovery | null = null;
   private readonly recoveryLoad: Promise<void>;
   private cleanConstructionState: string | null = null;
@@ -409,6 +416,14 @@ export class AuthoringWorkspace {
     return this.actionErrorMessage;
   }
 
+  recordDiagnostic(phase: FailurePhase, code: string): void {
+    this.diagnosticHistory.record(phase, code);
+  }
+
+  diagnosticReport(userAgent: string): string {
+    return this.diagnosticHistory.report(userAgent);
+  }
+
   get recoveryAvailable(): boolean {
     return this.recoveryRecord !== null;
   }
@@ -416,13 +431,16 @@ export class AuthoringWorkspace {
   async reportActionError(
     error: unknown,
     recoverableSnapshot: boolean,
+    phase: FailurePhase = "transaction",
   ): Promise<void> {
-    this.actionErrorMessage =
-      error instanceof ApplyFailure
-        ? `[${error.code}${error.reason ? `/${error.reason}` : ""}] ${error.message}${recoverableSnapshot ? " Download the current construction if possible, then reload before applying again." : ""}`
-        : error instanceof Error
-          ? error.message
-          : "GeoGebra action failed.";
+    const notice = failureNotice(error, phase);
+    this.recordDiagnostic(
+      notice.phase,
+      error instanceof ApplyFailure ? error.code : notice.code,
+    );
+    if (error instanceof ApplyFailure && error.reason)
+      this.recordDiagnostic(notice.phase, error.reason);
+    this.actionErrorMessage = `[${notice.code}] ${notice.message}${recoverableSnapshot && error instanceof ApplyFailure && error.code !== "APPLY_ROLLBACK_FAILED" ? " Download the current construction if possible, then reload before applying again." : ""}`;
     if (
       error instanceof ApplyFailure &&
       error.code === "APPLY_ROLLBACK_FAILED" &&
@@ -664,7 +682,9 @@ export class AuthoringWorkspace {
 
   private handleEvent(event: ConstructionEvent): void {
     if (event.kind === "metadata-error") {
-      this.actionErrorMessage = event.message;
+      const notice = metadataNotice(event.message);
+      this.recordDiagnostic(notice.phase, notice.code);
+      this.actionErrorMessage = `[${notice.code}] ${notice.message}`;
       this.notify(this.compiled);
       return;
     }
@@ -741,10 +761,8 @@ export class AuthoringWorkspace {
       this.resyncTimer = setTimeout(() => {
         this.resyncTimer = undefined;
         void this.resynchronize().catch((error: unknown) => {
-          this.actionErrorMessage =
-            error instanceof Error
-              ? error.message
-              : "Construction resynchronization failed.";
+          this.recordDiagnostic("metadata", "METADATA_SYNC_FAILED");
+          this.actionErrorMessage = `[METADATA_SYNC_FAILED] ${failureNotice(error, "metadata").message}`;
           this.notify(this.compiled);
         });
       }, 0);

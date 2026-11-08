@@ -109,7 +109,7 @@ test("shows a version mismatch and recovers through Retry", async ({
   await page.goto("./");
   await expect(
     page.getByRole("status", { name: "Applet status" }),
-  ).toContainText("Version mismatch");
+  ).toContainText("GeoGebra compatibility failure");
   await page.getByRole("button", { name: "Retry GeoGebra" }).click();
   await expect(
     page.getByRole("status", { name: "Applet status" }),
@@ -130,7 +130,7 @@ test("shows a retryable bundle failure", async ({ page }) => {
   await page.goto("./");
   await expect(
     page.getByRole("status", { name: "Applet status" }),
-  ).toContainText("GeoGebra bundle could not be loaded");
+  ).toContainText("GeoGebra could not load");
   await page.getByRole("button", { name: "Retry GeoGebra" }).click();
   await expect(
     page.getByRole("status", { name: "Applet status" }),
@@ -150,7 +150,7 @@ test("shows a retryable applet initialization failure and keeps the editor avail
   const editor = page.getByRole("textbox", { name: "Authoring Source" });
   await expect(
     page.getByRole("status", { name: "Applet status" }),
-  ).toContainText("Applet rejected initialization");
+  ).toContainText("GeoGebra could not load");
   await page.getByRole("button", { name: "Retry GeoGebra" }).click();
   await expect(
     page.getByRole("status", { name: "Applet status" }),
