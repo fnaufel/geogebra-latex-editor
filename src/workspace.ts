@@ -17,6 +17,16 @@ import {
   saveFailedApplyRecovery,
   type FailedApplyRecovery,
 } from "./failed-apply-recovery";
+import {
+  clearLocalRecoveryData,
+  constructionFingerprint,
+  listRecoveryRecords,
+  removeRecoveryRecord,
+  saveRecoveryRecord,
+  TabPresence,
+  type RecoveryDraft,
+  type RecoveryRecord,
+} from "./recovery";
 
 export interface WorkspaceAdapter {
   getSymbols(): SymbolInfo[];
@@ -91,6 +101,18 @@ export class AuthoringWorkspace {
   private readonly recoveryLoad: Promise<void>;
   private cleanConstructionState: string | null = null;
   private constructionChanged = false;
+  private workspaceId = crypto.randomUUID();
+  private constructionFingerprint: string | null = null;
+  private recoveryRecords: RecoveryRecord[] = [];
+  private startupRecovery = true;
+  private recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  private recoveryGeneration = 0;
+  private activeRecoveryKey: string | null = null;
+  private concurrentWork = false;
+  private readonly presence = new TabPresence((concurrent) => {
+    this.concurrentWork = concurrent;
+    this.notify(this.compiled);
+  });
 
   constructor(
     private readonly notify: (result: CompileResult) => void,
@@ -108,6 +130,158 @@ export class AuthoringWorkspace {
         this.notify(this.compiled);
       })
       .catch(() => {});
+    void this.refreshRecoveryRecords();
+  }
+
+  get recoveryCandidates(): RecoveryRecord[] {
+    return this.recoveryRecords.filter(
+      (record) =>
+        record.workspaceId !== this.workspaceId &&
+        (this.constructionFingerprint
+          ? record.constructionFingerprint === this.constructionFingerprint
+          : this.startupRecovery && record.snapshot.length > 0),
+    );
+  }
+
+  get concurrentTabWarning(): boolean {
+    return this.concurrentWork;
+  }
+
+  async refreshRecoveryRecords(): Promise<void> {
+    try {
+      this.recoveryRecords = await listRecoveryRecords();
+      this.notify(this.compiled);
+    } catch {
+      // Private browsing may disable IndexedDB; the editor remains usable.
+    }
+  }
+
+  async clearLocalRecovery(): Promise<{ records: number; bytes: number }> {
+    const removed = await clearLocalRecoveryData();
+    this.recoveryRecords = [];
+    this.recoveryRecord = null;
+    this.activeRecoveryKey = null;
+    this.recoveryGeneration++;
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.notify(this.compiled);
+    return removed;
+  }
+
+  async discardRecovery(key: string): Promise<void> {
+    await removeRecoveryRecord(key);
+    await this.refreshRecoveryRecords();
+  }
+
+  async restoreRecovery(
+    key: string,
+    useSnapshot: boolean,
+  ): Promise<void> {
+    const record = this.recoveryRecords.find((candidate) => candidate.key === key);
+    if (!record) throw new Error("Recovery Draft is no longer available.");
+    if (!useSnapshot && record.constructionFingerprint !== this.constructionFingerprint)
+      throw new Error("This Recovery Draft belongs to a different construction.");
+    if (useSnapshot) {
+      await this.open(record.snapshot);
+      this.constructionFingerprint = record.constructionFingerprint;
+      this.presence.setFingerprint(this.constructionFingerprint);
+      this.startupRecovery = false;
+    }
+    const managed = this.adapter?.getManagedTexts() ?? [];
+    for (const draft of record.drafts) {
+      const byId = managed.find((text) => text.id === draft.id);
+      const matches = managed.filter(
+        (text) =>
+          text.compiledFingerprint === draft.baseline.compiledFingerprint &&
+          text.source === draft.baseline.source &&
+          text.simplify === draft.baseline.simplify,
+      );
+      const target = byId ?? (matches.length === 1 ? matches[0] : undefined);
+      if (target) {
+        this.drafts.set(target.id, {
+          source: draft.source,
+          simplify: draft.simplify,
+        });
+        this.draftBaselines.set(target.id, draft.baseline);
+      } else {
+        this.retainedOrphans.set(draft.id, {
+          id: draft.id,
+          targetLabel: draft.targetLabel,
+          source: draft.baseline.source,
+          simplify: draft.baseline.simplify,
+          compiledFingerprint: draft.baseline.compiledFingerprint,
+          candidates: matches.map((text) => text.targetLabel),
+        });
+        this.drafts.set(draft.id, {
+          source: draft.source,
+          simplify: draft.simplify,
+        });
+      }
+    }
+    const first = record.drafts[0];
+    const target = managed.find((text) => text.id === first?.id);
+    if (target) this.loadTarget(target);
+    else if (first) this.openOrphaned(first.id);
+    this.message = "Recovery Draft restored locally. Review it before Apply.";
+    await removeRecoveryRecord(key);
+    await this.refreshRecoveryRecords();
+    this.scheduleRecovery();
+    this.validateNow();
+  }
+
+  private scheduleRecovery(): void {
+    this.recoveryGeneration++;
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    const generation = this.recoveryGeneration;
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      void this.persistRecovery(generation);
+    }, 500);
+  }
+
+  private async persistRecovery(generation: number): Promise<void> {
+    if (!this.adapter) return;
+    const key = `${this.constructionFingerprint ?? "unsaved"}:${this.workspaceId}`;
+    if (!this.hasAnyDraft && !this.dirtyConstruction) {
+      if (this.activeRecoveryKey) await removeRecoveryRecord(this.activeRecoveryKey);
+      this.activeRecoveryKey = null;
+      await this.refreshRecoveryRecords();
+      return;
+    }
+    try {
+      const snapshot = await this.adapter.exportBase64();
+      if (generation !== this.recoveryGeneration) return;
+      const applied = new Map(this.adapter.getManagedTexts().map((text) => [text.id, text]));
+      const drafts: RecoveryDraft[] = [...this.drafts].flatMap(([id, draft]) => {
+        const baseline = this.draftBaselines.get(id) ?? applied.get(id);
+        if (!baseline) return [];
+        return [{
+          id,
+          targetLabel: applied.get(id)?.targetLabel ?? this.orphaned?.targetLabel ?? id,
+          source: draft.source,
+          simplify: draft.simplify,
+          baseline: {
+            source: baseline.source,
+            simplify: baseline.simplify,
+            compiledFingerprint: baseline.compiledFingerprint,
+          },
+        }];
+      });
+      await saveRecoveryRecord({
+        key,
+        workspaceId: this.workspaceId,
+        constructionFingerprint: this.constructionFingerprint,
+        snapshot,
+        drafts,
+        savedAt: Date.now(),
+      });
+      if (this.activeRecoveryKey && this.activeRecoveryKey !== key)
+        await removeRecoveryRecord(this.activeRecoveryKey);
+      this.activeRecoveryKey = key;
+      await this.refreshRecoveryRecords();
+    } catch {
+      this.message = "Local recovery storage is unavailable. Download the construction to keep your work.";
+      this.notify(this.compiled);
+    }
   }
 
   get selectionMessage(): string {

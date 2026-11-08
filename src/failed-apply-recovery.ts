@@ -34,8 +34,13 @@ async function fingerprint(snapshot: string): Promise<string> {
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DATABASE, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(STORE);
+    const request = indexedDB.open(DATABASE, 2);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(STORE))
+        request.result.createObjectStore(STORE);
+      if (!request.result.objectStoreNames.contains("drafts"))
+        request.result.createObjectStore("drafts");
+    };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
