@@ -22,6 +22,7 @@ import {
   type SymbolInfo,
 } from "./compiler";
 import { AuthoringWorkspace } from "./workspace";
+import type { RecoveryRecord } from "./recovery";
 import type { GeoGebraAdapter, ManagedText, OrphanedText } from "./geogebra";
 
 export interface AuthoringUiState {
@@ -41,6 +42,8 @@ export interface AuthoringUiState {
   interactionMessage: string;
   actionError: string | null;
   recoveryAvailable: boolean;
+  recoveryCandidates: RecoveryRecord[];
+  concurrentTabWarning: boolean;
 }
 
 const LATEX_COMPLETIONS = [
@@ -177,6 +180,13 @@ export function mountAuthoringEditor(
   newConstruction: () => Promise<void>;
   exportBase64: () => Promise<string>;
   markConstructionClean: () => void;
+  noteDownloaded: (base64: string) => Promise<void>;
+  recoveryCandidates: () => RecoveryRecord[];
+  restoreRecovery: (key: string) => Promise<void>;
+  discardRecovery: (key: string) => Promise<void>;
+  clearLocalRecovery: () => Promise<{ records: number; bytes: number }>;
+  localRecoverySize: () => Promise<{ records: number; bytes: number }>;
+  dispose: () => Promise<void>;
   dirtyConstruction: () => boolean;
   draftDetails: () => {
     label: string;
@@ -220,6 +230,8 @@ export function mountAuthoringEditor(
       interactionMessage: workspace.interactionMessage,
       actionError: workspace.actionError,
       recoveryAvailable: workspace.recoveryAvailable,
+      recoveryCandidates: workspace.recoveryCandidates,
+      concurrentTabWarning: workspace.concurrentTabWarning,
     });
   const render = (result: CompileResult) => {
     if (
@@ -374,6 +386,18 @@ export function mountAuthoringEditor(
     },
     exportBase64: () => workspace.exportBase64(),
     markConstructionClean: () => workspace.markConstructionClean(),
+    noteDownloaded: (base64) => workspace.noteDownloaded(base64),
+    recoveryCandidates: () => workspace.recoveryCandidates,
+    restoreRecovery: async (key) => {
+      await workspace.restoreRecovery(key, true);
+      states.clear();
+      shownId = null;
+      showTarget();
+    },
+    discardRecovery: (key) => workspace.discardRecovery(key),
+    clearLocalRecovery: () => workspace.clearLocalRecovery(),
+    localRecoverySize: () => workspace.localRecoverySize(),
+    dispose: () => workspace.dispose(),
     dirtyConstruction: () => workspace.dirtyConstruction,
     draftDetails: () => workspace.draftDetails,
     applyAllValidDrafts: () => workspace.applyAllValidDrafts(),

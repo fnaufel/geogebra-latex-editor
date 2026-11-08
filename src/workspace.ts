@@ -19,11 +19,14 @@ import {
 } from "./failed-apply-recovery";
 import {
   clearLocalRecoveryData,
-  constructionFingerprint,
+  constructionFingerprint as fingerprintConstruction,
   listRecoveryRecords,
+  measureLocalRecoveryData,
   removeRecoveryRecord,
   saveRecoveryRecord,
+  stageRecoveryRecord,
   TabPresence,
+  unstageRecoveryRecord,
   type RecoveryDraft,
   type RecoveryRecord,
 } from "./recovery";
@@ -74,6 +77,7 @@ export class AuthoringWorkspace {
   } | null = null;
   private orphaned: OrphanedText | null = null;
   private readonly retainedOrphans = new Map<string, OrphanedText>();
+  private readonly recoveredOrphanIds = new Set<string>();
   private selected: readonly SymbolInfo[] = [];
   private readonly drafts = new Map<
     string,
@@ -107,8 +111,12 @@ export class AuthoringWorkspace {
   private startupRecovery = true;
   private recoveryTimer: ReturnType<typeof setTimeout> | undefined;
   private recoveryGeneration = 0;
+  private recoveryWrite: Promise<void> = Promise.resolve();
+  private lastSnapshot: string | null = null;
+  private stagedRecoveryKey: string | null = null;
   private activeRecoveryKey: string | null = null;
   private concurrentWork = false;
+  private recoveryStorageUnavailable = false;
   private readonly presence = new TabPresence((concurrent) => {
     this.concurrentWork = concurrent;
     this.notify(this.compiled);
@@ -157,14 +165,22 @@ export class AuthoringWorkspace {
   }
 
   async clearLocalRecovery(): Promise<{ records: number; bytes: number }> {
+    this.recoveryGeneration++;
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    await this.recoveryWrite;
+    await this.recoveryLoad;
     const removed = await clearLocalRecoveryData();
     this.recoveryRecords = [];
     this.recoveryRecord = null;
     this.activeRecoveryKey = null;
-    this.recoveryGeneration++;
-    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.stagedRecoveryKey = null;
     this.notify(this.compiled);
     return removed;
+  }
+
+  async localRecoverySize(): Promise<{ records: number; bytes: number }> {
+    await this.recoveryWrite;
+    return measureLocalRecoveryData();
   }
 
   async discardRecovery(key: string): Promise<void> {
@@ -172,21 +188,33 @@ export class AuthoringWorkspace {
     await this.refreshRecoveryRecords();
   }
 
-  async restoreRecovery(
-    key: string,
-    useSnapshot: boolean,
-  ): Promise<void> {
-    const record = this.recoveryRecords.find((candidate) => candidate.key === key);
+  async restoreRecovery(key: string, useSnapshot: boolean): Promise<void> {
+    const record = this.recoveryRecords.find(
+      (candidate) => candidate.key === key,
+    );
     if (!record) throw new Error("Recovery Draft is no longer available.");
-    if (!useSnapshot && record.constructionFingerprint !== this.constructionFingerprint)
-      throw new Error("This Recovery Draft belongs to a different construction.");
+    if (
+      !useSnapshot &&
+      (!this.constructionFingerprint ||
+        record.constructionFingerprint !== this.constructionFingerprint)
+    )
+      throw new Error(
+        "This Recovery Draft belongs to a different construction.",
+      );
     if (useSnapshot) {
       await this.open(record.snapshot);
       this.constructionFingerprint = record.constructionFingerprint;
       this.presence.setFingerprint(this.constructionFingerprint);
       this.startupRecovery = false;
+      if (record.dirtyConstruction) {
+        this.cleanConstructionState = null;
+        this.constructionChanged = true;
+      }
     }
     const managed = this.adapter?.getManagedTexts() ?? [];
+    let firstTarget: ManagedText | undefined;
+    let hasOrphan = false;
+    let hasDivergedDraft = false;
     for (const draft of record.drafts) {
       const byId = managed.find((text) => text.id === draft.id);
       const matches = managed.filter(
@@ -197,12 +225,19 @@ export class AuthoringWorkspace {
       );
       const target = byId ?? (matches.length === 1 ? matches[0] : undefined);
       if (target) {
+        firstTarget ??= target;
+        hasDivergedDraft ||=
+          target.source !== draft.baseline.source ||
+          target.simplify !== draft.baseline.simplify ||
+          target.compiledFingerprint !== draft.baseline.compiledFingerprint;
         this.drafts.set(target.id, {
           source: draft.source,
           simplify: draft.simplify,
         });
         this.draftBaselines.set(target.id, draft.baseline);
       } else {
+        hasOrphan = true;
+        this.recoveredOrphanIds.add(draft.id);
         this.retainedOrphans.set(draft.id, {
           id: draft.id,
           targetLabel: draft.targetLabel,
@@ -218,45 +253,59 @@ export class AuthoringWorkspace {
       }
     }
     const first = record.drafts[0];
-    const target = managed.find((text) => text.id === first?.id);
-    if (target) this.loadTarget(target);
-    else if (first) this.openOrphaned(first.id);
-    this.message = "Recovery Draft restored locally. Review it before Apply.";
+    if (firstTarget) {
+      this.editingTarget = null;
+      this.loadTarget(firstTarget);
+    } else if (first) this.openOrphaned(first.id);
+    this.message = `Recovery Draft restored locally and ${hasDivergedDraft ? "diverges from" : "matches"} the construction snapshot's Applied Source baseline. Review before Apply.${hasOrphan ? " Orphaned Source remains because an Editing Target could not be identified safely; restore it explicitly as new text." : ""}`;
     await removeRecoveryRecord(key);
     await this.refreshRecoveryRecords();
     this.scheduleRecovery();
     this.validateNow();
   }
 
-  private scheduleRecovery(): void {
+  private scheduleRecovery(captureSnapshot = false): void {
     this.recoveryGeneration++;
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.stageRecovery();
     const generation = this.recoveryGeneration;
+    const snapshot = captureSnapshot ? this.adapter?.exportBase64() : undefined;
+    if (snapshot)
+      void snapshot
+        .then((base64) => {
+          if (generation !== this.recoveryGeneration) return;
+          this.lastSnapshot = base64;
+          this.stageRecovery();
+        })
+        .catch(() => {});
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = undefined;
-      void this.persistRecovery(generation);
-    }, 500);
+      this.recoveryWrite = this.recoveryWrite
+        .then(() => this.persistRecovery(generation, snapshot))
+        .catch(() => {});
+    }, 0);
   }
 
-  private async persistRecovery(generation: number): Promise<void> {
-    if (!this.adapter) return;
-    const key = `${this.constructionFingerprint ?? "unsaved"}:${this.workspaceId}`;
-    if (!this.hasAnyDraft && !this.dirtyConstruction) {
-      if (this.activeRecoveryKey) await removeRecoveryRecord(this.activeRecoveryKey);
-      this.activeRecoveryKey = null;
-      await this.refreshRecoveryRecords();
-      return;
-    }
-    try {
-      const snapshot = await this.adapter.exportBase64();
-      if (generation !== this.recoveryGeneration) return;
-      const applied = new Map(this.adapter.getManagedTexts().map((text) => [text.id, text]));
-      const drafts: RecoveryDraft[] = [...this.drafts].flatMap(([id, draft]) => {
-        const baseline = this.draftBaselines.get(id) ?? applied.get(id);
-        if (!baseline) return [];
-        return [{
+  private recoveryDrafts(): RecoveryDraft[] {
+    const applied = new Map(
+      this.adapter?.getManagedTexts().map((text) => [text.id, text]) ?? [],
+    );
+    return [...this.drafts].flatMap(([id, draft]) => {
+      const baseline =
+        this.draftBaselines.get(id) ??
+        applied.get(id) ??
+        this.retainedOrphans.get(id);
+      if (!baseline) return [];
+      return [
+        {
           id,
-          targetLabel: applied.get(id)?.targetLabel ?? this.orphaned?.targetLabel ?? id,
+          targetLabel:
+            applied.get(id)?.targetLabel ??
+            this.retainedOrphans.get(id)?.targetLabel ??
+            (this.orphaned?.id === id
+              ? this.orphaned.targetLabel
+              : undefined) ??
+            id,
           source: draft.source,
           simplify: draft.simplify,
           baseline: {
@@ -264,22 +313,66 @@ export class AuthoringWorkspace {
             simplify: baseline.simplify,
             compiledFingerprint: baseline.compiledFingerprint,
           },
-        }];
-      });
+        },
+      ];
+    });
+  }
+
+  private stageRecovery(): void {
+    const key = `${this.constructionFingerprint ?? "unsaved"}:${this.workspaceId}`;
+    if (this.stagedRecoveryKey && this.stagedRecoveryKey !== key)
+      unstageRecoveryRecord(this.stagedRecoveryKey);
+    if (!this.lastSnapshot || (!this.hasAnyDraft && !this.dirtyConstruction)) {
+      unstageRecoveryRecord(key);
+      this.stagedRecoveryKey = null;
+      return;
+    }
+    stageRecoveryRecord({
+      key,
+      workspaceId: this.workspaceId,
+      constructionFingerprint: this.constructionFingerprint,
+      snapshot: this.lastSnapshot,
+      drafts: this.recoveryDrafts(),
+      dirtyConstruction: this.dirtyConstruction,
+      savedAt: Date.now(),
+    });
+    this.stagedRecoveryKey = key;
+  }
+
+  private async persistRecovery(
+    generation: number,
+    pendingSnapshot?: Promise<string>,
+  ): Promise<void> {
+    if (!this.adapter || generation !== this.recoveryGeneration) return;
+    const key = `${this.constructionFingerprint ?? "unsaved"}:${this.workspaceId}`;
+    if (!this.hasAnyDraft && !this.dirtyConstruction) {
+      if (this.activeRecoveryKey)
+        await removeRecoveryRecord(this.activeRecoveryKey);
+      this.activeRecoveryKey = null;
+      await this.refreshRecoveryRecords();
+      return;
+    }
+    try {
+      const snapshot = await (pendingSnapshot ?? this.adapter.exportBase64());
+      if (generation !== this.recoveryGeneration) return;
+      this.lastSnapshot = snapshot;
+      this.stageRecovery();
       await saveRecoveryRecord({
         key,
         workspaceId: this.workspaceId,
         constructionFingerprint: this.constructionFingerprint,
         snapshot,
-        drafts,
+        drafts: this.recoveryDrafts(),
+        dirtyConstruction: this.dirtyConstruction,
         savedAt: Date.now(),
       });
       if (this.activeRecoveryKey && this.activeRecoveryKey !== key)
         await removeRecoveryRecord(this.activeRecoveryKey);
       this.activeRecoveryKey = key;
+      this.recoveryStorageUnavailable = false;
       await this.refreshRecoveryRecords();
     } catch {
-      this.message = "Local recovery storage is unavailable. Download the construction to keep your work.";
+      this.recoveryStorageUnavailable = true;
       this.notify(this.compiled);
     }
   }
@@ -307,7 +400,9 @@ export class AuthoringWorkspace {
   }
 
   get interactionMessage(): string {
-    return this.message;
+    return this.recoveryStorageUnavailable
+      ? `${this.message} Local recovery storage is unavailable. Download the construction to keep your work.`.trim()
+      : this.message;
   }
 
   get actionError(): string | null {
@@ -431,19 +526,43 @@ export class AuthoringWorkspace {
   }
 
   async restoreOrphaned(): Promise<ManagedText> {
-    if (
-      !this.canRestoreOrphaned ||
-      !this.orphaned ||
-      !this.adapter?.restoreOrphanedText
-    )
+    if (!this.canRestoreOrphaned || !this.orphaned || !this.adapter)
       throw new Error("No Orphaned Source is available for restoration.");
-    const target = await this.adapter.restoreOrphanedText(
-      this.orphaned.id,
-      this.source,
-      this.simplify,
-    );
-    this.retainedOrphans.delete(target.id);
+    const oldId = this.orphaned.id;
+    const desiredSource = this.source;
+    const desiredSimplify = this.simplify;
+    let target: ManagedText;
+    if (this.recoveredOrphanIds.has(oldId)) {
+      const result = this.validateNow();
+      if (!result.expression)
+        throw new Error(
+          "Correct the recovered Authoring Source before restoring it.",
+        );
+      const created = await this.adapter.createManagedText();
+      target = await this.adapter.applyManagedText(
+        created.id,
+        this.source,
+        this.simplify,
+        result.expression,
+      );
+    } else {
+      if (!this.adapter.restoreOrphanedText)
+        throw new Error("GeoGebra cannot restore this Orphaned Source.");
+      target = await this.adapter.restoreOrphanedText(
+        oldId,
+        this.source,
+        this.simplify,
+      );
+    }
+    this.retainedOrphans.delete(oldId);
+    this.recoveredOrphanIds.delete(oldId);
+    this.drafts.delete(oldId);
+    this.draftBaselines.delete(oldId);
+    this.orphaned = null;
     this.loadTarget(target);
+    if (this.source !== desiredSource) this.setSource(desiredSource);
+    if (this.simplify !== desiredSimplify) this.setSimplify(desiredSimplify);
+    this.scheduleRecovery();
     this.message = `Orphaned Source restored as ${target.targetLabel}.`;
     this.notify(this.compiled);
     return target;
@@ -473,18 +592,24 @@ export class AuthoringWorkspace {
   async discardOrphaned(): Promise<void> {
     const orphan = this.orphaned;
     if (!orphan) throw new Error("No Orphaned Source is open.");
-    if (this.canRestoreOrphaned && this.adapter) {
+    if (
+      !this.recoveredOrphanIds.has(orphan.id) &&
+      this.canRestoreOrphaned &&
+      this.adapter
+    ) {
       if (!this.adapter.discardOrphanedText)
         throw new Error("GeoGebra cannot discard this Orphaned Source.");
       await this.adapter.discardOrphanedText(orphan.id);
     }
     this.retainedOrphans.delete(orphan.id);
+    this.recoveredOrphanIds.delete(orphan.id);
     this.drafts.delete(orphan.id);
     this.draftBaselines.delete(orphan.id);
     this.orphaned = null;
     this.source = "";
     this.simplify = true;
     this.message = `Orphaned Source for ${orphan.targetLabel} was discarded.`;
+    this.scheduleRecovery();
     this.validateNow();
   }
 
@@ -610,6 +735,7 @@ export class AuthoringWorkspace {
       event.kind === "redo"
     ) {
       this.constructionChanged = true;
+      this.scheduleRecovery(true);
       this.symbols = this.adapter?.getSymbols() ?? this.symbols;
       if (this.resyncTimer) clearTimeout(this.resyncTimer);
       this.resyncTimer = setTimeout(() => {
@@ -833,15 +959,17 @@ export class AuthoringWorkspace {
   get canRestoreOrphaned(): boolean {
     return (
       !!this.orphaned &&
-      !!this.adapter
-        ?.getOrphanedTexts?.()
-        .some(
-          (text) =>
-            text.id === this.orphaned?.id &&
-            text.source === this.orphaned.source &&
-            text.simplify === this.orphaned.simplify &&
-            text.compiledFingerprint === this.orphaned.compiledFingerprint,
-        )
+      !!this.adapter &&
+      (this.recoveredOrphanIds.has(this.orphaned.id) ||
+        !!this.adapter
+          .getOrphanedTexts?.()
+          .some(
+            (text) =>
+              text.id === this.orphaned?.id &&
+              text.source === this.orphaned.source &&
+              text.simplify === this.orphaned.simplify &&
+              text.compiledFingerprint === this.orphaned.compiledFingerprint,
+          ))
     );
   }
 
@@ -888,6 +1016,7 @@ export class AuthoringWorkspace {
     this.simplify = this.editingTarget.simplify;
     this.drafts.delete(this.editingTarget.id);
     this.draftBaselines.delete(this.editingTarget.id);
+    this.scheduleRecovery();
     this.validateNow();
   }
 
@@ -925,7 +1054,16 @@ export class AuthoringWorkspace {
     this.cleanConstructionState =
       this.adapter?.getConstructionState?.() ?? null;
     this.constructionChanged = false;
+    this.scheduleRecovery();
     this.notify(this.compiled);
+  }
+
+  async noteDownloaded(base64: string): Promise<void> {
+    this.lastSnapshot = base64;
+    this.constructionFingerprint = await fingerprintConstruction(base64);
+    this.presence.setFingerprint(this.constructionFingerprint);
+    this.startupRecovery = false;
+    this.markConstructionClean();
   }
 
   private assessDraft(
@@ -1025,6 +1163,7 @@ export class AuthoringWorkspace {
       if (this.editingTarget?.id === id) this.editingTarget = updated;
     }
     this.validateNow();
+    this.scheduleRecovery();
   }
 
   private loadTarget(target: ManagedText | null): void {
@@ -1059,8 +1198,10 @@ export class AuthoringWorkspace {
   async create(): Promise<ManagedText> {
     if (!this.adapter) throw new Error("GeoGebra adapter is unavailable.");
     const target = await this.adapter.createManagedText();
+    this.lastSnapshot = await this.adapter.exportBase64().catch(() => null);
     this.clearActionError();
     this.loadTarget(target);
+    this.scheduleRecovery();
     return target;
   }
 
@@ -1084,6 +1225,7 @@ export class AuthoringWorkspace {
     this.editingTarget = target;
     this.drafts.delete(target.id);
     this.draftBaselines.delete(target.id);
+    this.scheduleRecovery();
     return target;
   }
 
@@ -1106,18 +1248,24 @@ export class AuthoringWorkspace {
           target: this.editingTarget?.id,
         }),
     );
+    this.lastSnapshot = base64;
     this.clearActionError();
     this.drafts.clear();
     this.draftBaselines.clear();
     this.undoneAdoptions.clear();
     this.retainedOrphans.clear();
+    this.recoveredOrphanIds.clear();
     this.editingTarget = null;
     this.orphaned = null;
     this.selected = [];
     this.insertionRange = null;
     const target = this.adapter.getManagedTexts()[0] ?? null;
     this.loadTarget(target);
+    this.constructionFingerprint = await fingerprintConstruction(base64);
+    this.presence.setFingerprint(this.constructionFingerprint);
+    this.startupRecovery = false;
     this.markConstructionClean();
+    await this.refreshRecoveryRecords();
     return target;
   }
 
@@ -1125,15 +1273,20 @@ export class AuthoringWorkspace {
     if (!this.adapter?.newConstruction)
       throw new Error("GeoGebra New is unavailable.");
     await this.adapter.newConstruction();
+    this.lastSnapshot = null;
     this.clearActionError();
     this.drafts.clear();
     this.draftBaselines.clear();
     this.undoneAdoptions.clear();
     this.retainedOrphans.clear();
+    this.recoveredOrphanIds.clear();
     this.editingTarget = null;
     this.orphaned = null;
     this.selected = [];
     this.loadTarget(null);
+    this.constructionFingerprint = null;
+    this.presence.setFingerprint(null);
+    this.startupRecovery = false;
     this.markConstructionClean();
   }
 
@@ -1171,6 +1324,7 @@ export class AuthoringWorkspace {
       });
     if (this.orphaned)
       this.drafts.set(this.orphaned.id, { source, simplify: this.simplify });
+    this.scheduleRecovery();
     this.schedule();
   }
 
@@ -1182,6 +1336,7 @@ export class AuthoringWorkspace {
       this.drafts.set(this.editingTarget.id, { source: this.source, simplify });
     if (this.orphaned)
       this.drafts.set(this.orphaned.id, { source: this.source, simplify });
+    this.scheduleRecovery();
     this.schedule();
   }
 
@@ -1211,10 +1366,13 @@ export class AuthoringWorkspace {
     return this.compiled;
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     if (this.timer) clearTimeout(this.timer);
     if (this.resyncTimer) clearTimeout(this.resyncTimer);
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.presence.close();
     this.unsubscribe?.();
+    await this.recoveryWrite;
   }
 
   private schedule(): void {

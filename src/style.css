@@ -96,8 +96,17 @@ h1 {
   font-size: 0.78rem;
   white-space: nowrap;
 }
+#recovery-status,
+#concurrent-warning {
+  font-size: 0.78rem;
+}
+#concurrent-warning {
+  flex-basis: 100%;
+  color: #fff3b0;
+}
 
-#download-dialog {
+#download-dialog,
+#recovery-dialog {
   width: min(34rem, calc(100vw - 2rem));
   max-height: calc(100vh - 2rem);
   overflow: auto;
@@ -108,7 +117,8 @@ h1 {
   background: #fff;
   box-shadow: 0 1rem 3rem #14263b55;
 }
-#download-dialog::backdrop {
+#download-dialog::backdrop,
+#recovery-dialog::backdrop {
   background: #14263baa;
 }
 #download-dialog h2,
@@ -131,6 +141,25 @@ h1 {
   display: block;
   width: 100%;
   margin-top: 0.3rem;
+}
+#recovery-dialog > p {
+  line-height: 1.5;
+}
+#recovery-entries section {
+  margin: 0.8rem 0;
+  padding: 0.8rem;
+  border: 1px solid #c5d3df;
+  border-radius: 0.35rem;
+}
+#recovery-entries h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.9rem;
+}
+#recovery-entries p {
+  line-height: 1.5;
+}
+#recovery-entries button {
+  margin-right: 0.5rem;
 }
 .dialog-actions {
   display: flex;

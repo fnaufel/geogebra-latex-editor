@@ -25,6 +25,9 @@ root.innerHTML = `
       <button id="download-original-metadata" type="button" hidden>Download original metadata</button>
       <span id="filename">construction.ggb</span>
       <span id="construction-state" role="status" aria-live="polite">Construction current</span>
+      <button id="local-recovery" type="button">Local recovery (0)</button>
+      <span id="recovery-status" role="status" aria-live="polite"></span>
+      <span id="concurrent-warning" role="status" aria-live="polite" hidden></span>
     </div>
   </header>
   <main class="workspace" aria-label="Construction and authoring workspace">
@@ -93,6 +96,15 @@ root.innerHTML = `
       <button id="confirm-download" type="button">Download .ggb</button>
     </div>
   </dialog>
+  <dialog id="recovery-dialog" aria-labelledby="recovery-title">
+    <h2 id="recovery-title">Local recovery</h2>
+    <p>Recovery stays in this browser. Review each entry before restoring its construction snapshot and Draft Sources.</p>
+    <div id="recovery-entries"></div>
+    <div class="dialog-actions">
+      <button id="clear-local-recovery" type="button">Clear local recovery data</button>
+      <button id="close-recovery" type="button">Close</button>
+    </div>
+  </dialog>
   <footer class="footer">
     <span>Unofficial · Made with GeoGebra®</span>
     <nav aria-label="Project and GeoGebra information">
@@ -132,6 +144,13 @@ const downloadOriginalMetadata = required<HTMLButtonElement>(
 );
 const filename = required<HTMLElement>("#filename");
 const constructionState = required<HTMLElement>("#construction-state");
+const localRecovery = required<HTMLButtonElement>("#local-recovery");
+const recoveryStatus = required<HTMLElement>("#recovery-status");
+const concurrentWarning = required<HTMLElement>("#concurrent-warning");
+const recoveryDialog = required<HTMLDialogElement>("#recovery-dialog");
+const recoveryEntries = required<HTMLElement>("#recovery-entries");
+const clearLocalRecovery = required<HTMLButtonElement>("#clear-local-recovery");
+const closeRecovery = required<HTMLButtonElement>("#close-recovery");
 const downloadDialog = required<HTMLDialogElement>("#download-dialog");
 const downloadDrafts = required<HTMLElement>("#download-drafts");
 const downloadName = required<HTMLInputElement>("#download-name");
@@ -216,6 +235,8 @@ const authoring = mountAuthoringEditor(
     interactionMessage,
     actionError,
     recoveryAvailable,
+    recoveryCandidates,
+    concurrentTabWarning,
   }) => {
     targetLabel.textContent = target
       ? `Editing Target: ${target.targetLabel}`
@@ -288,6 +309,14 @@ const authoring = mountAuthoringEditor(
     constructionState.textContent = dirtyConstruction
       ? "Dirty Construction · changes since last open or download"
       : "Construction current";
+    localRecovery.textContent = `Local recovery (${recoveryCandidates.length})`;
+    recoveryStatus.textContent = recoveryCandidates.length
+      ? `${recoveryCandidates.length} local Recovery Draft ${recoveryCandidates.length === 1 ? "entry is" : "entries are"} available.`
+      : "";
+    concurrentWarning.hidden = !concurrentTabWarning;
+    concurrentWarning.textContent = concurrentTabWarning
+      ? "Another tab has this construction open. Tabs remain independent; review changes before downloading."
+      : "";
     editSelected.disabled =
       fileOperationBusy || !canEditSelection || adapter.state.kind !== "ready";
     insertObject.disabled =
@@ -494,7 +523,7 @@ confirmDownload.addEventListener("click", () => {
     link.click();
     filename.textContent = link.download;
     adapter.noteDownloadDispatched();
-    authoring.markConstructionClean();
+    await authoring.noteDownloaded(base64);
     downloadOriginalMetadata.hidden = !adapter.recoverableOlderMetadataBytes;
     downloadDialog.close();
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
@@ -513,6 +542,73 @@ downloadOriginalMetadata.addEventListener("click", () => {
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 });
 retry.addEventListener("click", () => void adapter.retry());
+function renderRecoveryEntries(): void {
+  recoveryEntries.replaceChildren();
+  const records = authoring.recoveryCandidates();
+  if (records.length === 0) {
+    recoveryEntries.textContent =
+      "No local Recovery Drafts are available for this construction.";
+    return;
+  }
+  for (const record of records) {
+    const entry = document.createElement("section");
+    const heading = document.createElement("h3");
+    heading.textContent = `${record.drafts.length} Recovery Draft${record.drafts.length === 1 ? "" : "s"} · ${record.constructionFingerprint ? "Opened construction" : "Unsaved construction"}`;
+    const details = document.createElement("p");
+    details.textContent = `Saved ${new Date(record.savedAt).toLocaleString()} (${Math.max(0, Math.floor((Date.now() - record.savedAt) / 3_600_000))} hours ago). Workspace ${record.workspaceId.slice(0, 8)}. Construction fingerprint ${record.constructionFingerprint?.slice(0, 20) ?? "none"}. Snapshot ${record.snapshot.length} base64 characters.${record.dirtyConstruction ? " Snapshot includes construction changes not downloaded." : ""} Draft divergence from the snapshot is reported after restore.`;
+    const restore = document.createElement("button");
+    restore.type = "button";
+    restore.textContent = "Restore snapshot and drafts";
+    restore.addEventListener("click", () => {
+      if (authoring.hasAnyDraft() || authoring.dirtyConstruction())
+        if (
+          !window.confirm(
+            "Restoring this local snapshot will replace the current construction and its Draft Sources. Continue?",
+          )
+        )
+          return;
+      void authoring
+        .restoreRecovery(record.key)
+        .then(() => {
+          recoveryDialog.close();
+          renderRecoveryEntries();
+        })
+        .catch(reportActionError);
+    });
+    const discard = document.createElement("button");
+    discard.type = "button";
+    discard.textContent = "Discard Recovery Draft";
+    discard.addEventListener("click", () => {
+      void authoring
+        .discardRecovery(record.key)
+        .then(renderRecoveryEntries)
+        .catch(reportActionError);
+    });
+    entry.append(heading, details, restore, discard);
+    recoveryEntries.append(entry);
+  }
+}
+localRecovery.addEventListener("click", () => {
+  renderRecoveryEntries();
+  recoveryDialog.showModal();
+});
+closeRecovery.addEventListener("click", () => recoveryDialog.close());
+recoveryDialog.addEventListener("close", () => localRecovery.focus());
+clearLocalRecovery.addEventListener("click", () => {
+  void (async () => {
+    const size = await authoring.localRecoverySize();
+    if (
+      !window.confirm(
+        `Clear ${size.records} local recovery records (${size.bytes} bytes) from this browser?`,
+      )
+    )
+      return;
+    const removed = await authoring.clearLocalRecovery();
+    recoveryStatus.textContent = `Cleared ${removed.records} local recovery records (${removed.bytes} bytes).`;
+    renderRecoveryEntries();
+  })().catch(reportActionError);
+});
+window.addEventListener("pagehide", () => void authoring.dispose());
 new ResizeObserver(() => adapter.resize()).observe(
   required<HTMLElement>(".applet-stage"),
 );
