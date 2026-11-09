@@ -4,6 +4,40 @@ import { emptyMetadata, encodeMetadata } from "../../src/metadata";
 
 afterEach(() => vi.unstubAllGlobals());
 
+it("waits for a restored construction snapshot to become observable", async () => {
+  let xml = "<geogebra>damaged</geogebra>";
+  vi.stubGlobal(
+    "GGBApplet",
+    class {
+      constructor(private params: Record<string, unknown>) {}
+      setHTML5Codebase() {}
+      inject() {
+        const api = {
+          getVersion: () => GEOGEBRA_VERSION,
+          setWidth: () => {},
+          setHeight: () => {},
+          getXML: () => xml,
+          setXML: (snapshot: string) => {
+            setTimeout(() => (xml = snapshot), 50);
+          },
+        };
+        (this.params.appletOnLoad as (api: unknown) => void)(api);
+      }
+    },
+  );
+  const adapter = new GeoGebraAdapter(
+    document.createElement("div"),
+    () => {},
+    async () => {},
+  );
+  await adapter.start();
+  const snapshot = "<geogebra>recovered</geogebra>";
+  await expect(
+    Promise.resolve().then(() => adapter.restoreApplySnapshot(snapshot)),
+  ).resolves.toBeUndefined();
+  expect(adapter.getConstructionState()).toBe(snapshot);
+});
+
 it("stages a candidate before touching the visible construction", async () => {
   let injection = 0;
   let visibleImports = 0;

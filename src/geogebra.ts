@@ -277,13 +277,17 @@ export class GeoGebraAdapter {
     this.clearOlderMetadataRecovery();
   }
 
-  restoreApplySnapshot(snapshot: string): void {
+  async restoreApplySnapshot(snapshot: string): Promise<void> {
     const api = this.readyApi();
     if (!api.setXML || !api.getXML)
       throw new Error("GeoGebra recovery is unavailable.");
     api.setXML(snapshot);
-    if (api.getXML() !== snapshot)
-      throw new Error("Recovered construction did not match the snapshot.");
+    const deadline = performance.now() + 3_000;
+    while (api.getXML() !== snapshot) {
+      if (performance.now() >= deadline)
+        throw new Error("Recovered construction did not match the snapshot.");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     this.applyHalted = false;
     this.failedApplySnapshot = null;
   }

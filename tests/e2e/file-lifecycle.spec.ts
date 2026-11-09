@@ -33,7 +33,9 @@ async function download(page: Page, choice: "apply" | "applied" = "applied") {
     })
     .check();
   await dialog.getByRole("button", { name: "Download .ggb" }).click();
-  return result;
+  const saved = await result;
+  await expect(page.locator("#download-file")).toBeEnabled();
+  return saved;
 }
 
 test("New distinguishes Draft Sources and Dirty Construction and unload warns only for work at risk", async ({
@@ -87,6 +89,7 @@ test("New distinguishes Draft Sources and Dirty Construction and unload warns on
   await expect(page.locator("#target-label")).toContainText("Editing Target");
   await page.getByRole("button", { name: "New construction" }).click();
   await expect(page.locator("#target-label")).toHaveText("No Editing Target");
+  await expect(page.locator("#new-construction")).toBeEnabled();
   await expect(
     page.getByRole("button", { name: "Edit selected text" }),
   ).toBeDisabled();
@@ -132,6 +135,7 @@ test("Download offers cancel, Apply all valid drafts, and applied construction o
   await dialog.getByRole("textbox", { name: "Filename" }).fill("version-2");
   await dialog.getByRole("button", { name: "Download .ggb" }).click();
   expect((await appliedOnly).suggestedFilename()).toBe("version-2.ggb");
+  await expect(page.locator("#download-file")).toBeEnabled();
   await expect(page.locator("#filename")).toHaveText("version-2.ggb");
   await expect(page.locator("#target-state")).toHaveText(
     "Draft Source has unapplied changes.",
@@ -169,7 +173,20 @@ test("Open stages good files, rejects corrupt files, and honors canceled replace
   test.slow();
   await ready(page);
   await makeText(page, "Saved source");
+  await page.evaluate(() => {
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    Object.defineProperty(crypto.subtle, "digest", {
+      configurable: true,
+      value: async (...args: Parameters<typeof crypto.subtle.digest>) => {
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        return digest(...args);
+      },
+    });
+  });
   const saved = await download(page);
+  expect(await page.locator("#construction-state").innerText()).toBe(
+    "Construction current",
+  );
   const savedPath = await saved.path();
   if (!savedPath) throw new Error("Download path unavailable.");
   const lesson = {

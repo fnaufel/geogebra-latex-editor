@@ -223,11 +223,11 @@ it("keeps the recovery snapshot and Apply halt when restoration is incomplete", 
   await expect(apply(fixture.adapter)).rejects.toMatchObject({
     code: "APPLY_ROLLBACK_FAILED",
   });
-  expect(() =>
+  await expect(
     fixture.adapter.restoreApplySnapshot(
       fixture.adapter.recoverableApplySnapshot!,
     ),
-  ).toThrow("did not match");
+  ).rejects.toThrow("did not match");
   expect(fixture.adapter.hasRecoverableApplySnapshot).toBe(true);
   await expect(apply(fixture.adapter)).rejects.toThrow("Apply is disabled");
 });
