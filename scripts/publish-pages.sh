@@ -13,8 +13,8 @@ if [[ -n $(git status --porcelain) ]]; then
   exit 1
 fi
 
-git fetch origin master
-if [[ $(git rev-parse HEAD) != $(git rev-parse origin/master) ]]; then
+remote_master=$(git ls-remote origin refs/heads/master | cut -f1)
+if [[ $(git rev-parse HEAD) != "$remote_master" ]]; then
   echo "Push master before publishing." >&2
   exit 1
 fi
@@ -27,19 +27,20 @@ fi
 
 publish_dir=$(mktemp -d "${TMPDIR:-/tmp}/geogebra-pages.XXXXXX")
 cleanup() {
-  git worktree remove --force "$publish_dir" >/dev/null 2>&1 || true
   rm -rf -- "$publish_dir"
 }
 trap cleanup EXIT
 
+remote_url=$(git remote get-url origin)
 if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
-  git fetch origin gh-pages
-  git worktree add --detach "$publish_dir" origin/gh-pages
+  git clone --quiet --single-branch --branch gh-pages "$remote_url" "$publish_dir"
 else
-  git worktree add --detach "$publish_dir" HEAD
+  git clone --quiet --single-branch --branch master "$remote_url" "$publish_dir"
   git -C "$publish_dir" switch --orphan gh-pages
 fi
 
+git -C "$publish_dir" config user.name "$(git config user.name)"
+git -C "$publish_dir" config user.email "$(git config user.email)"
 find "$publish_dir" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +
 cp -R dist/. "$publish_dir/"
 touch "$publish_dir/.nojekyll"
