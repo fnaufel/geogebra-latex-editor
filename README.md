@@ -6,7 +6,9 @@ An unofficial, local-first editor for authoring LaTeX text in GeoGebra construct
 
 Use Node.js `26.13.0` and npm `12.2.2`. From the repository root, run `npm ci` and `npm run dev`. Open the local URL printed by Vite. The app loads GeoGebra Classic `5.4.920.0` from GeoGebra's CDN, so it needs a network connection.
 
-Run `npx playwright install chromium firefox webkit` once before browser tests. `npm run check` runs formatting, linting, type checking, unit tests, the production build, and browser tests in Chromium, Firefox, and Playwright WebKit. For routine Chromium-only feedback use `npm run test:e2e -- --project=chromium`. Individual commands are `npm run typecheck`, `npm run test:unit`, `npm run test:e2e`, and `npm run build`. CI runs these checks on pull requests and deploys the static build from `master` to GitHub Pages only after they pass. Vite uses the `/geogebra-latex-editor/` base path for Pages. The deployment remains pending until this release candidate is pushed and Pages is enabled for the repository.
+Run `npx playwright install chromium firefox webkit` once before browser tests. `npm run check` runs formatting, linting, type checking, unit tests, the production build, and browser tests in Chromium, Firefox, and Playwright WebKit. For routine Chromium-only feedback use `npm run test:e2e -- --project=chromium`. Individual commands are `npm run typecheck`, `npm run test:unit`, `npm run test:e2e`, and `npm run build`. Run the checks locally; this repository does not run GitHub CI. Vite uses the `/geogebra-latex-editor/` base path for Pages.
+
+To publish, run `npm run check`, commit and push `master`, then run `npm run publish:pages`. The publish command builds locally, commits the contents of `dist/` to the `gh-pages` branch, and pushes that branch. Configure GitHub Pages to **Deploy from a branch**, using `gh-pages` and `/(root)`. See the [release checklist](docs/release-checklist.md) for deployed verification.
 
 ## Scope and access
 

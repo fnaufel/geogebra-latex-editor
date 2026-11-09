@@ -4,7 +4,7 @@ This checklist records the release candidate separately from human browser certi
 
 ## Automated gate
 
-Use Node `26.13.0` and npm `12.2.2`. Run `npm ci`, `npx playwright install --with-deps chromium firefox webkit`, and `npm run check`. The check command runs formatting, lint, strict TypeScript, all unit tests, the production build, and Playwright across Chromium, Firefox, and WebKit. CI runs this gate for pull requests and `master`; the Pages deployment job runs only after the gate succeeds on a `master` push. Inspect the applet status in each browser to confirm it reports `5.4.920.0`.
+Use Node `26.13.0` and npm `12.2.2`. Run `npm ci`, `npx playwright install --with-deps chromium firefox webkit`, and `npm run check` locally. The check command runs formatting, lint, strict TypeScript, all unit tests, the production build, and Playwright across Chromium, Firefox, and WebKit. Inspect the applet status in each browser to confirm it reports `5.4.920.0`. Record the local check result before publishing.
 
 The browser suite includes real applet contract tests for version, file round trip, metadata capacity, object events, presentation preservation, grouped Apply history, safe Value Expressions, and local recovery. Unit tests exercise the pure compiler, metadata, workspace, transaction and rollback, and sanitized diagnostics. `tests/e2e/release-accessibility.spec.ts` checks the surrounding keyboard path; embedded GeoGebra accessibility remains upstream-dependent.
 
@@ -27,15 +27,16 @@ Before publishing, inspect the resulting `dist/` and run `npm run preview` at `/
 
 ## Pages publication
 
-Pages must be configured to deploy through GitHub Actions. A passing `master` push uploads `dist/` and triggers the deployment job. After publication, open the final repository subpath, confirm all assets load, confirm the applet reports `5.4.920.0`, and repeat the twelve journeys against the deployed candidate. Record the Pages deployment URL, workflow run URL, commit SHA, date, and any failures here before marking the release deployed.
+Configure Pages to deploy from the `gh-pages` branch at `/(root)`. After the local check passes, commit and push `master`, then run `npm run publish:pages`. That command rebuilds locally and pushes `dist/` plus `.nojekyll` to `gh-pages`. After publication, open the final repository subpath, confirm all assets load, confirm the applet reports `5.4.920.0`, and repeat the twelve journeys against the deployed candidate. Record the Pages URL, source and publication commit SHAs, local check result, date, and any failures here before marking the release deployed.
 
-| Evidence                 | Result             |
-| ------------------------ | ------------------ |
-| Pages URL                | Pending deployment |
-| Passing workflow run     | Pending deployment |
-| Deployed commit SHA      | Pending deployment |
-| Deployed applet version  | Pending deployment |
-| Twelve deployed journeys | Pending deployment |
+| Evidence                 | Result                                                                                             |
+| ------------------------ | -------------------------------------------------------------------------------------------------- |
+| Local check              | Passed 2026-11-09: 114 unit and 129 browser tests, plus formatting, lint, type checking, and build |
+| Pages URL                | Pending deployment                                                                                 |
+| Source commit SHA        | Pending deployment                                                                                 |
+| Publication commit SHA   | Pending deployment                                                                                 |
+| Deployed applet version  | Pending deployment                                                                                 |
+| Twelve deployed journeys | Pending deployment                                                                                 |
 
 ## Manual branded browser certification
 
