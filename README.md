@@ -1,6 +1,6 @@
 # LaTeX Text Editor for GeoGebra
 
-An unofficial, local-first editor for authoring LaTeX text in GeoGebra constructions. Start with the [user guide](docs/user-guide.md), try the [example construction](examples/motivating-formula.ggb), and use the [release checklist](docs/release-checklist.md) for validation. The [accepted specification](docs/specs/0001-v0.1.0-geogebra-latex-editor.md) defines the release behavior.
+An unofficial, local-first editor for authoring LaTeX text in GeoGebra constructions. Open the [published editor](https://fnaufel.github.io/geogebra-latex-editor/), start with the [user guide](docs/user-guide.md), try the [example construction](examples/motivating-formula.ggb), and use the [release checklist](docs/release-checklist.md) for validation. The [accepted specification](docs/specs/0001-v0.1.0-geogebra-latex-editor.md) defines the release behavior.
 
 ## Run locally
 

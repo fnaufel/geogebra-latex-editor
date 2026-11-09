@@ -27,16 +27,16 @@ Before publishing, inspect the resulting `dist/` and run `npm run preview` at `/
 
 ## Pages publication
 
-Configure Pages to deploy from the `gh-pages` branch at `/(root)`. After the local check passes, commit and push `master`, then run `npm run publish:pages`. That command rebuilds locally and pushes `dist/` plus `.nojekyll` to `gh-pages`. After publication, open the final repository subpath, confirm all assets load, confirm the applet reports `5.4.920.0`, and repeat the twelve journeys against the deployed candidate. Record the Pages URL, source and publication commit SHAs, local check result, date, and any failures here before marking the release deployed.
+Configure Pages to deploy from the `gh-pages` branch at `/(root)`. After the local check passes, commit and push `master`, then run `npm run publish:pages`. That command rebuilds locally and pushes `dist/` plus `.nojekyll` to `gh-pages`. After publication, open the final repository subpath, confirm all assets load, confirm the applet reports `5.4.920.0`, and repeat the twelve journeys against the deployed candidate. Run the browser suite against Pages locally with `PLAYWRIGHT_BASE_URL=https://fnaufel.github.io/geogebra-latex-editor/ npm run test:e2e`. Record the Pages URL, source and publication commit SHAs, local check result, date, and any failures here before marking the release deployed.
 
 | Evidence                 | Result                                                                                             |
 | ------------------------ | -------------------------------------------------------------------------------------------------- |
 | Local check              | Passed 2026-11-09: 114 unit and 129 browser tests, plus formatting, lint, type checking, and build |
-| Pages URL                | Pending deployment                                                                                 |
-| Source commit SHA        | Pending deployment                                                                                 |
-| Publication commit SHA   | Pending deployment                                                                                 |
-| Deployed applet version  | Pending deployment                                                                                 |
-| Twelve deployed journeys | Pending deployment                                                                                 |
+| Pages URL                | [Published site](https://fnaufel.github.io/geogebra-latex-editor/) returned HTTP 200 on 2026-11-09 |
+| Source commit SHA        | `158f33f7c07ddbf8fc311ffb481fa59613e265f0`                                                         |
+| Publication commit SHA   | `c2f65e9ef19e61896ca15afaf8954fbb88f42a43`                                                         |
+| Deployed applet version  | `5.4.920.0` in a Chromium smoke check; no failed requests                                          |
+| Twelve deployed journeys | Passed on 2026-11-09 as part of 129 browser tests against the published Pages URL                  |
 
 ## Manual branded browser certification
 
